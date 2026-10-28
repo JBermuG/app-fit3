@@ -1,0 +1,49 @@
+name: Build Unsigned GalaxyFit3 IPA
+
+on:
+  push:
+    branches: [ "*" ]
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    name: Build iOS IPA (Unsigned for AltStore/SideStore/Sideloadly)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure XcodeGen is installed and generate Xcode project
+        run: |
+          if ! command -v xcodegen &> /dev/null; then
+            brew install xcodegen
+          fi
+          xcodegen generate
+
+      - name: Build GalaxyFit3.app for iOS Device (Unsigned)
+        run: |
+          xcodebuild clean build \
+            -project GalaxyFit3.xcodeproj \
+            -scheme GalaxyFit3 \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Package GalaxyFit3.app into GalaxyFit3.ipa
+        run: |
+          rm -rf Payload GalaxyFit3.ipa
+          mkdir -p Payload
+          cp -R "build/Build/Products/Release-iphoneos/GalaxyFit3.app" Payload/
+          zip -r9 GalaxyFit3.ipa Payload
+
+      - name: Upload GalaxyFit3.ipa Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GalaxyFit3-Unsigned-IPA
+          path: GalaxyFit3.ipa
+          if-no-files-found: error
+          retention-days: 30
