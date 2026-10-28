@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>es</string>
+	<key>CFBundleDisplayName</key>
+	<string>Galaxy Fit 3</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>GalaxyFit3</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+	</dict>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+
+	<!-- Permisos obligatorios de CoreBluetooth (iOS 13+ / iOS 15+) -->
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Esta aplicación necesita acceso permanente a Bluetooth para conectar, sincronizar la hora, recibir notificaciones (ANCS) y leer el pulso y batería de tu Samsung Galaxy Fit 3 (SM-R390).</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Esta aplicación utiliza Bluetooth para comunicarse con tu reloj Samsung Galaxy Fit 3 (SM-R390).</string>
+
+	<!-- Permisos descriptivos opcionales de Apple Health (No requieren Entitlement de pago para compilar) -->
+	<key>NSHealthShareUsageDescription</key>
+	<string>Permite consultar datos de salud de forma opcional.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>Permite guardar las lecturas de frecuencia cardíaca del Samsung Galaxy Fit 3 en Apple Salud si activas la opción.</string>
+
+	<!-- Modo en segundo plano para mantener vivo el enlace BLE y reconexión automática -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+	</array>
+
+	<!-- Permite explorar el archivo galaxy_fit3_heartrate.csv directamente en la app Archivos de iOS -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+</dict>
+</plist>
