@@ -32,9 +32,9 @@ ble_manager = BLEManager()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Inicialización en arranque
+    # Inicialización en arranque (Sin sembrar datos demo falsos)
     database.init_db()
-    database.seed_initial_demo_data()
+    database.purge_demo_data()
     logger.info("=" * 60)
     logger.info("🚀 Fit3 Mac Studio iniciado con éxito")
     logger.info("💻 Visualización y recolección de datos en tu Mac:")
@@ -71,6 +71,8 @@ class WriteCharRequest(BaseModel):
 class MapCharRequest(BaseModel):
     target: str # steps, heart_rate, sleep
     uuid: str
+    offset: Optional[int] = 0
+    byte_length: Optional[int] = 4 # 2 para uint16, 4 para uint32
 
 class MockToggleRequest(BaseModel):
     enabled: bool
