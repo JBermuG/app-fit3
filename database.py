@@ -415,3 +415,5 @@ def export_heart_rate_csv() -> str:
         writer.writerow([r["timestamp"], r["bpm"], r["contact"], r["rr_interval_ms"], r["source"]])
     return output.getvalue()
 
+# Inicializar esquema de tablas al importar el módulo
+init_db()
