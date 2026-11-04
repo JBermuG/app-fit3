@@ -1279,7 +1279,74 @@
       }
     }
 
+    function updateMappingBadge(uuid, offset, byteLen) {
+      const badge = document.getElementById('currentMappingBadge');
+      if (badge) {
+        badge.textContent = `UUID: ${uuid.toUpperCase()} • Off: ${offset} • u${byteLen * 8}LE`;
+      }
+      const inpUuid = document.getElementById('mapStepsUuidInput');
+      const inpOff = document.getElementById('mapStepsOffsetInput');
+      const selBytes = document.getElementById('mapStepsBytesSelect');
+      if (inpUuid && document.activeElement !== inpUuid) inpUuid.value = uuid.toUpperCase();
+      if (inpOff && document.activeElement !== inpOff) inpOff.value = offset;
+      if (selBytes && document.activeElement !== selBytes) selBytes.value = byteLen;
+    }
+
+    async function fetchStepsMapping() {
+      try {
+        const res = await fetch('/api/mapping/steps');
+        const data = await res.json();
+        if (data.uuid) {
+          updateMappingBadge(data.uuid, data.offset || 0, data.byte_length || 4);
+        }
+      } catch (e) {}
+    }
+
+    async function saveCustomStepsMapping() {
+      const uuid = document.getElementById('mapStepsUuidInput').value.trim();
+      const offset = parseInt(document.getElementById('mapStepsOffsetInput').value, 10) || 0;
+      const byte_length = parseInt(document.getElementById('mapStepsBytesSelect').value, 10) || 4;
+      if (!uuid) return;
+
+      try {
+        const res = await fetch('/api/characteristics/map', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target: 'steps', uuid, offset, byte_length })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          updateMappingBadge(uuid, offset, byte_length);
+          showToast(`✅ Mapeo guardado: ${uuid.toUpperCase()} (Off: ${offset}, u${byte_length * 8}LE)`);
+          fetchTelemetry();
+        } else {
+          showToast(data.detail || "Error al guardar mapeo.", true);
+        }
+      } catch (e) {
+        showToast("Error al guardar mapeo.", true);
+      }
+    }
+
+    async function applyStepMapping(uuid, offset, byteLen) {
+      const inpUuid = document.getElementById('mapStepsUuidInput');
+      const inpOff = document.getElementById('mapStepsOffsetInput');
+      const selBytes = document.getElementById('mapStepsBytesSelect');
+      if (inpUuid) inpUuid.value = uuid.toUpperCase();
+      if (inpOff) inpOff.value = offset;
+      if (selBytes) selBytes.value = byteLen;
+      await saveCustomStepsMapping();
+    }
+
     async function mapChar(target, uuid) {
+      if (target === 'steps') {
+        const inpOff = document.getElementById('mapStepsOffsetInput');
+        const offset = inpOff ? parseInt(inpOff.value, 10) || 0 : 0;
+        const selBytes = document.getElementById('mapStepsBytesSelect');
+        const byteLen = selBytes ? parseInt(selBytes.value, 10) || 4 : 4;
+        await applyStepMapping(uuid, offset, byteLen);
+        return;
+      }
+
       try {
         const res = await fetch('/api/characteristics/map', {
           method: 'POST',
@@ -1289,6 +1356,19 @@
         showToast(`UUID ${uuid} asignado a ${target.toUpperCase()}`);
       } catch (e) {
         showToast("Error al mapear característica.");
+      }
+    }
+
+    async function purgeDemoDataFromDb() {
+      if (!confirm("¿Deseas purgar de SQLite todos los registros de demostración antiguos generados por la semilla?")) return;
+      try {
+        const res = await fetch('/api/database/purge-demo', { method: 'POST' });
+        const data = await res.json();
+        showToast(data.message || "Datos demo purgados exitosamente.");
+        fetchDataRecords();
+        fetchTelemetry();
+      } catch (e) {
+        showToast("Error al purgar datos demo.", true);
       }
     }
 
