@@ -366,7 +366,6 @@ def get_recent_packets(limit: int = 60) -> List[Dict[str, Any]]:
 def seed_initial_demo_data():
     """Solo para pruebas manuales si el usuario lo solicita explícitamente."""
     pass
-            save_heart_rate(bpm=bpm, contact=True, rr_interval_ms=int(60000 / bpm), source="Galaxy Fit3 (78DC) Demo")
 
 def export_full_database_dict() -> Dict[str, Any]:
     conn = get_connection()
