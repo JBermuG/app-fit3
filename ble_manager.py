@@ -550,6 +550,7 @@ class BLEManager:
 
             chars_info = []
             for char in service.characteristics:
+                last_hex = None
                 short_c_uuid = normalize_uuid(char.uuid)
                 c_name = STANDARD_UUIDS.get(short_c_uuid, f"Característica {short_c_uuid.upper()}")
                 props = char.properties
