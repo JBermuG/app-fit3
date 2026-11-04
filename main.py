@@ -32,9 +32,9 @@ ble_manager = BLEManager()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Inicialización en arranque (Sin sembrar datos demo falsos)
+    # Inicialización en arranque
     database.init_db()
-    database.purge_demo_data()
+    ble_manager._load_initial_metrics()
     logger.info("=" * 60)
     logger.info("🚀 Fit3 Mac Studio iniciado con éxito")
     logger.info("💻 Visualización y recolección de datos en tu Mac:")
