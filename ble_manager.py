@@ -79,23 +79,34 @@ class BLEManager:
         self._active_peripheral: Optional[Any] = None
         self._connect_lock = asyncio.Lock()
 
-        # Telemetría actual
-        self.battery_level: int = 86
-        self.current_hr: int = 74
-        self.today_steps: int = 6842
-        self.today_calories: float = 287.4
-        self.today_distance: float = 5063.0
-        self.today_active_minutes: int = 54
-        self.current_spo2: int = 98
+        # Telemetría actual (Sin valores ficticios por defecto)
+        self.battery_level: Optional[int] = None
+        self.current_hr: Optional[int] = None
+        self.today_steps: Optional[int] = None
+        self.today_calories: Optional[float] = None
+        self.today_distance: Optional[float] = None
+        self.today_active_minutes: Optional[int] = None
+        self.current_spo2: Optional[int] = None
+        self.has_real_battery: bool = False
+        self.has_real_hr: bool = False
+        self.has_real_steps: bool = False
+        self.has_real_spo2: bool = False
+        self.has_real_sleep: bool = False
+
         self.device_model: str = "SM-R390"
         self.device_manufacturer: str = "Samsung Electronics"
         self.device_firmware: str = "R390XXU0AXB4"
         self.last_rssi: int = -51
 
-        # Mapeos dinámicos configurables por el usuario para ingeniería inversa
-        self.custom_steps_uuid: str = "FEA1"
-        self.custom_hr_uuid: str = "2A37"
-        self.custom_sleep_uuid: str = "FEA2"
+        # Mapeos dinámicos configurables para ingeniería inversa
+        self.custom_steps_uuid: str = database.get_setting("custom_steps_uuid", "FEA1")
+        self.custom_steps_offset: int = int(database.get_setting("custom_steps_offset", "0"))
+        self.custom_steps_bytes: int = int(database.get_setting("custom_steps_bytes", "4")) # 2 o 4 bytes
+        self.custom_hr_uuid: str = database.get_setting("custom_hr_uuid", "2A37")
+        self.custom_sleep_uuid: str = database.get_setting("custom_sleep_uuid", "FEA2")
+
+        # Historial de paquetes previos para cálculo de delta y detección de pasos
+        self._last_char_payloads: Dict[str, bytes] = {}
 
         # Modo Simulación
         self.is_mock_mode: bool = False
@@ -105,21 +116,42 @@ class BLEManager:
         # Clientes WebSocket conectados
         self.websocket_clients: Set[Any] = set()
 
-        # Inicializar métricas desde SQLite
+        # Inicializar métricas desde SQLite (solo si hay datos reales)
         self._load_initial_metrics()
 
     def _load_initial_metrics(self):
         summary = database.get_today_summary()
-        self.today_steps = summary.get("steps", 0)
-        self.today_calories = summary.get("calories", 0.0)
-        self.today_distance = summary.get("distance_meters", 0.0)
-        self.today_active_minutes = summary.get("active_minutes", 0)
-        if summary.get("heart_rate_latest"):
-            self.current_hr = summary["heart_rate_latest"]
-        if summary.get("battery"):
-            self.battery_level = summary["battery"]
-        if summary.get("spo2"):
-            self.current_spo2 = summary["spo2"]
+        self.has_real_steps = summary.get("has_real_steps", False)
+        self.has_real_hr = summary.get("has_real_hr", False)
+        self.has_real_battery = summary.get("has_real_battery", False)
+        self.has_real_spo2 = summary.get("has_real_spo2", False)
+        self.has_real_sleep = summary.get("has_real_sleep", False)
+
+        if self.has_real_steps:
+            self.today_steps = summary.get("steps")
+            self.today_calories = summary.get("calories")
+            self.today_distance = summary.get("distance_meters")
+            self.today_active_minutes = summary.get("active_minutes")
+        else:
+            self.today_steps = None
+            self.today_calories = None
+            self.today_distance = None
+            self.today_active_minutes = None
+
+        if self.has_real_hr:
+            self.current_hr = summary.get("heart_rate_latest")
+        else:
+            self.current_hr = None
+
+        if self.has_real_battery:
+            self.battery_level = summary.get("battery")
+        else:
+            self.battery_level = None
+
+        if self.has_real_spo2:
+            self.current_spo2 = summary.get("spo2")
+        else:
+            self.current_spo2 = None
 
     # MARK: - CoreBluetooth Manager Helper (macOS Native)
 
