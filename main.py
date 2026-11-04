@@ -168,14 +168,44 @@ async def map_characteristic(req: MapCharRequest):
     cleaned = req.uuid.upper().strip()
     if req.target == "steps":
         ble_manager.custom_steps_uuid = cleaned
+        ble_manager.custom_steps_offset = max(0, req.offset or 0)
+        ble_manager.custom_steps_bytes = 2 if req.byte_length == 2 else 4
+        database.save_setting("custom_steps_uuid", ble_manager.custom_steps_uuid)
+        database.save_setting("custom_steps_offset", str(ble_manager.custom_steps_offset))
+        database.save_setting("custom_steps_bytes", str(ble_manager.custom_steps_bytes))
     elif req.target == "heart_rate":
         ble_manager.custom_hr_uuid = cleaned
+        database.save_setting("custom_hr_uuid", ble_manager.custom_hr_uuid)
     elif req.target == "sleep":
         ble_manager.custom_sleep_uuid = cleaned
+        database.save_setting("custom_sleep_uuid", ble_manager.custom_sleep_uuid)
     else:
         raise HTTPException(status_code=400, detail=f"Objetivo de mapeo '{req.target}' no válido.")
 
-    return {"status": "success", "target": req.target, "uuid": cleaned}
+    await ble_manager.broadcast_event("status_update", ble_manager.get_status())
+    return {
+        "status": "success",
+        "target": req.target,
+        "uuid": cleaned,
+        "offset": getattr(ble_manager, "custom_steps_offset", 0),
+        "byte_length": getattr(ble_manager, "custom_steps_bytes", 4)
+    }
+
+@app.get("/api/mapping/steps")
+async def get_steps_mapping():
+    return {
+        "uuid": ble_manager.custom_steps_uuid,
+        "offset": ble_manager.custom_steps_offset,
+        "byte_length": ble_manager.custom_steps_bytes
+    }
+
+@app.post("/api/database/purge-demo")
+async def purge_demo_endpoint():
+    database.purge_demo_data()
+    ble_manager._load_initial_metrics()
+    await ble_manager.broadcast_event("telemetry_update", ble_manager.get_telemetry())
+    await ble_manager.broadcast_event("status_update", ble_manager.get_status())
+    return {"status": "success", "message": "Datos demo purgados de SQLite exitosamente."}
 
 @app.post("/api/mock/toggle")
 async def toggle_mock(req: MockToggleRequest):
