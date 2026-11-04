@@ -743,43 +743,61 @@
       const quickBtn = document.getElementById('btnQuickConnect');
       const avatar = document.getElementById('deviceAvatar');
 
-      sub.textContent = status.last_status_message;
-      cardMsg.textContent = status.last_status_message;
+      if (sub && status.last_status_message) sub.textContent = status.last_status_message;
+      if (cardMsg && status.last_status_message) cardMsg.textContent = status.last_status_message;
 
       if (status.connection_state === 'connected') {
-        badge.textContent = "Conectado";
-        badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-fitSage/20 text-fitSage border border-fitSage/30";
-        cardName.textContent = status.connected_device_name;
-        quickBtn.textContent = "Desconectar";
-        quickBtn.className = "px-4 py-2 rounded-xl bg-fitCoral text-white text-xs font-bold hover:brightness-105 transition-all";
-        avatar.classList.add('pulse-watch');
+        if (badge) {
+          badge.textContent = "Conectado";
+          badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-fitSage/20 text-fitSage border border-fitSage/30";
+        }
+        if (cardName) cardName.textContent = status.connected_device_name;
+        if (quickBtn) {
+          quickBtn.textContent = "Desconectar";
+          quickBtn.className = "px-4 py-2 rounded-xl bg-fitCoral text-white text-xs font-bold hover:brightness-105 transition-all";
+        }
+        if (avatar) avatar.classList.add('pulse-watch');
       } else if (status.connection_state === 'simulating') {
-        badge.textContent = "Simulación";
-        badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-fitAmber/20 text-fitAmber border border-fitAmber/30";
-        cardName.textContent = "Galaxy Fit3 (78DC) [Sim]";
-        quickBtn.textContent = "Detener Sim";
-        quickBtn.className = "px-4 py-2 rounded-xl bg-appCardElevated text-appText border border-appBorder text-xs font-bold";
-        avatar.classList.remove('pulse-watch');
+        if (badge) {
+          badge.textContent = "Simulación";
+          badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-fitAmber/20 text-fitAmber border border-fitAmber/30";
+        }
+        if (cardName) cardName.textContent = "Galaxy Fit3 (78DC) [Sim]";
+        if (quickBtn) {
+          quickBtn.textContent = "Detener Sim";
+          quickBtn.className = "px-4 py-2 rounded-xl bg-appCardElevated text-appText border border-appBorder text-xs font-bold";
+        }
+        if (avatar) avatar.classList.remove('pulse-watch');
       } else if (status.connection_state === 'connecting' || status.connection_state === 'scanning') {
-        badge.textContent = status.connection_state === 'scanning' ? "Buscando..." : "Conectando...";
-        badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-fitTerracotta/20 text-fitTerracotta border border-fitTerracotta/30";
+        if (badge) {
+          badge.textContent = status.connection_state === 'scanning' ? "Buscando..." : "Conectando...";
+          badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-fitTerracotta/20 text-fitTerracotta border border-fitTerracotta/30";
+        }
       } else {
-        badge.textContent = "Desconectado";
-        badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-appCardElevated text-appMuted border border-appBorder";
-        quickBtn.textContent = "Conectar Reloj";
-        quickBtn.className = "px-4 py-2 rounded-xl bg-fitAmber text-black text-xs font-bold hover:brightness-105 transition-all";
-        avatar.classList.remove('pulse-watch');
+        if (badge) {
+          badge.textContent = "Desconectado";
+          badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-appCardElevated text-appMuted border border-appBorder";
+        }
+        if (quickBtn) {
+          quickBtn.textContent = "Conectar Reloj";
+          quickBtn.className = "px-4 py-2 rounded-xl bg-fitAmber text-black text-xs font-bold hover:brightness-105 transition-all";
+        }
+        if (avatar) avatar.classList.remove('pulse-watch');
       }
 
-      btnMock.textContent = state.isMockMode ? "Simulación ON" : "Simulación OFF";
+      if (btnMock) btnMock.textContent = state.isMockMode ? "Simulación ON" : "Simulación OFF";
 
-      // Actualizar IP local y QR si vino en el payload
+      // Actualizar IP local y QR si existen en el DOM
       if (status.local_ip) {
         state.localIp = status.local_ip;
         const url = `http://${status.local_ip}:${status.server_port || 8000}`;
-        document.getElementById('localIpUrlText').textContent = url;
-        document.getElementById('shortcutEndpointCode').textContent = `${url}/api/apple-health-export`;
-        renderQRCode(url);
+        const elUrl = document.getElementById('localIpUrlText');
+        if (elUrl) elUrl.textContent = url;
+        const elShortcut = document.getElementById('shortcutEndpointCode');
+        if (elShortcut) elShortcut.textContent = `${url}/api/apple-health-export`;
+        if (typeof renderQRCode === 'function' && document.getElementById('qrCodeContainer')) {
+          renderQRCode(url);
+        }
       }
     }
 
