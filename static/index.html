@@ -366,6 +366,46 @@
             Conecta el reloj o activa el Modo Simulación para explorar sus UUIDs propietarios y servicios estándar.
           </div>
         </div>
+      <!-- Panel de Ingeniería Inversa y Mapeo de Pasos Samsung -->
+      <div class="bg-appCard border border-appBorder rounded-3xl p-5 shadow-sm space-y-4">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h3 class="font-bold text-base text-appText flex items-center gap-2">
+              <span class="text-fitAmber">🎯</span> Decodificador y Mapeo de Pasos Samsung
+            </h3>
+            <p class="text-xs text-appMuted">
+              Fit 3 no usa el estándar GATT 0x1814. Al mover el reloj o caminar, las tramas muestran enteros Little-Endian crecientes (+DELTA). Configura o haz clic en "🎯 Mapear a Pasos" en la consola inferior para inyectarlos en el Dashboard.
+            </p>
+          </div>
+          <div class="flex items-center gap-2">
+            <span id="currentMappingBadge" class="text-xs font-mono font-bold px-3 py-1 rounded-full bg-fitAmber/15 text-fitAmber border border-fitAmber/30">
+              UUID: FEA1 • Off: 0 • u32LE
+            </span>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end pt-2 border-t border-appBorder">
+          <div class="sm:col-span-1">
+            <label class="block text-[10px] text-appMuted font-bold uppercase mb-1">UUID Característica</label>
+            <input id="mapStepsUuidInput" type="text" value="FEA1" placeholder="ej. FEA1 o UUID" class="w-full bg-appCardElevated border border-appBorder rounded-xl px-3 py-2 text-xs font-mono text-appText focus:outline-none focus:border-fitAmber" />
+          </div>
+          <div class="sm:col-span-1">
+            <label class="block text-[10px] text-appMuted font-bold uppercase mb-1">Offset (Byte inicio)</label>
+            <input id="mapStepsOffsetInput" type="number" min="0" max="20" value="0" class="w-full bg-appCardElevated border border-appBorder rounded-xl px-3 py-2 text-xs font-mono text-appText focus:outline-none focus:border-fitAmber" />
+          </div>
+          <div class="sm:col-span-1">
+            <label class="block text-[10px] text-appMuted font-bold uppercase mb-1">Formato Bytes</label>
+            <select id="mapStepsBytesSelect" class="w-full bg-appCardElevated border border-appBorder rounded-xl px-3 py-2 text-xs font-mono text-appText focus:outline-none focus:border-fitAmber">
+              <option value="4" selected>uint32LE (4 bytes)</option>
+              <option value="2">uint16LE (2 bytes)</option>
+            </select>
+          </div>
+          <div class="sm:col-span-1">
+            <button onclick="saveCustomStepsMapping()" class="w-full py-2 bg-fitAmber text-black font-bold rounded-xl text-xs hover:brightness-105 transition-all">
+              💾 Guardar Mapeo
+            </button>
+          </div>
+        </div>
       </div>
 
       <!-- Consola Hexadecimal Sniffer en Vivo -->
