@@ -190,6 +190,8 @@ def save_ble_packet(service_uuid: str, char_uuid: str, direction: str, hex_strin
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (now_str, service_uuid, char_uuid, direction, hex_string, json.dumps(raw_bytes), decoded_summary, note))
     conn.commit()
+    conn.close()
+
 def save_setting(key: str, value: str):
     conn = get_connection()
     cursor = conn.cursor()
@@ -217,12 +219,12 @@ def purge_demo_data():
     init_db()
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM steps WHERE source LIKE '%Demo%'")
-    cursor.execute("DELETE FROM heart_rate WHERE source LIKE '%Demo%'")
-    cursor.execute("DELETE FROM sleep_sessions WHERE source LIKE '%Demo%'")
-    cursor.execute("DELETE FROM spo2 WHERE source LIKE '%Demo%'")
-    cursor.execute("DELETE FROM battery WHERE id IN (SELECT id FROM battery ORDER BY id ASC LIMIT 2)") # limpia semilla inicial de batería si existía
-    cursor.execute("DELETE FROM ble_packets WHERE service_uuid LIKE '%Mock%' OR char_uuid LIKE '%Mock%'")
+    cursor.execute("DELETE FROM steps")
+    cursor.execute("DELETE FROM heart_rate")
+    cursor.execute("DELETE FROM sleep_sessions")
+    cursor.execute("DELETE FROM spo2")
+    cursor.execute("DELETE FROM battery")
+    cursor.execute("DELETE FROM ble_packets")
     conn.commit()
     conn.close()
 
