@@ -592,12 +592,69 @@ class BLEManager:
         await self.broadcast_event("services_discovered", self.discovered_services)
 
     async def _auto_subscribe_essential_services(self):
-        """Activa notificaciones automáticas en Heart Rate y Battery si están disponibles."""
+        """
+        1. Lee directamente el nivel de batería real en 0x2A19 (GATT estándar 0x180F).
+        2. Suscribe notificaciones a Heart Rate (0x2A37) y Batería (0x2A19).
+        3. Suscribe automáticamente a todas las características notificables de los servicios propietarios de Samsung (UUIDs FEE..., FD..., etc.).
+        """
+        if not self.client or not self.client.is_connected:
+            return
+
+        # PASO 1: Lectura directa de Batería real (0x2A19)
         for s in self.discovered_services:
             for c in s["characteristics"]:
-                short = c["short_uuid"].lower()
-                if c["can_notify"] and short in ["2a37", "2a19", "2a53"]:
+                short_c = c["short_uuid"].lower()
+                full_c = c["uuid"].lower()
+                if short_c == "2a19" or "00002a19" in full_c:
+                    try:
+                        logger.info(f"🔋 Leyendo porcentaje de batería real en {c['uuid']}...")
+                        val = await asyncio.wait_for(self.client.read_gatt_char(c["uuid"]), timeout=3.0)
+                        if val and len(val) >= 1:
+                            real_bat = int(val[0])
+                            if 0 <= real_bat <= 100:
+                                self.battery_level = real_bat
+                                self.has_real_battery = True
+                                database.save_battery(self.battery_level)
+                                c["last_hex"] = val.hex().upper()
+                                logger.info(f"✅ Batería real confirmada del reloj: {self.battery_level}%")
+                                await self.broadcast_event("telemetry_update", self.get_telemetry())
+                    except Exception as e:
+                        logger.warning(f"Aviso al leer batería directa 0x2A19: {e}")
+
+        # PASO 2: Suscribir a Heart Rate, Batería y Servicios Propietarios de Samsung
+        for s in self.discovered_services:
+            short_s = s["short_uuid"].lower()
+            is_samsung_service = (
+                s.get("is_proprietary", False)
+                or short_s.startswith("fe")
+                or short_s.startswith("fd")
+                or "0000fee" in s["uuid"].lower()
+                or "0000fd" in s["uuid"].lower()
+            )
+
+            for c in s["characteristics"]:
+                short_c = c["short_uuid"].lower()
+                full_c = c["uuid"].lower()
+                can_notify = c.get("can_notify", False)
+
+                if not can_notify:
+                    continue
+
+                should_subscribe = False
+                # Estándares esenciales
+                if short_c in ["2a37", "2a19", "2a53"]:
+                    should_subscribe = True
+                # Propietarios Samsung (FEE..., FD...)
+                elif is_samsung_service or short_c.startswith("fe") or short_c.startswith("fd") or "fee" in full_c or "fd" in full_c:
+                    should_subscribe = True
+
+                if should_subscribe and c["uuid"] not in self.active_subscriptions:
+                    logger.info(f"📡 Suscribiendo automáticamente a característica: {c['name']} ({c['uuid']})")
                     await self.start_notify(c["uuid"])
+                    await asyncio.sleep(0.08)
+
+        await self.broadcast_event("telemetry_update", self.get_telemetry())
+        await self.broadcast_event("status_update", self.get_status())
 
     async def start_notify(self, char_uuid: str) -> bool:
         if not self.client or not self.client.is_connected:
