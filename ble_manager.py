@@ -757,6 +757,70 @@ class BLEManager:
 
     # MARK: - Packet Parsing & Reverse Engineering
 
+    def _analyze_step_candidates(self, char_uuid: str, byte_list: List[int]) -> List[Dict[str, Any]]:
+        """
+        Analiza secuencias de 2 y 4 bytes Little-Endian (uint16 / uint32) en cada offset.
+        Compara con el payload anterior de esta misma característica para calcular deltas.
+        Identifica secuencias que aumentan progresivamente (+1 a +150) o valores en rango de pasos diarios.
+        """
+        prev_bytes = self._last_char_payloads.get(char_uuid)
+        candidates = []
+        n = len(byte_list)
+
+        # 1. uint16 Little-Endian en offsets 0..n-2
+        for offset in range(0, n - 1):
+            val16 = byte_list[offset] | (byte_list[offset + 1] << 8)
+            delta = None
+            is_inc = False
+            if prev_bytes and len(prev_bytes) >= offset + 2:
+                prev_val16 = prev_bytes[offset] | (prev_bytes[offset + 1] << 8)
+                delta = val16 - prev_val16
+                if 1 <= delta <= 150:
+                    is_inc = True
+
+            if is_inc or (10 <= val16 <= 65000 and delta is not None and delta != 0):
+                candidates.append({
+                    "offset": offset,
+                    "byte_len": 2,
+                    "type": "uint16LE",
+                    "value": val16,
+                    "delta": delta,
+                    "is_increment": is_inc
+                })
+
+        # 2. uint32 Little-Endian en offsets 0..n-4
+        for offset in range(0, n - 3):
+            val32 = (
+                byte_list[offset]
+                | (byte_list[offset + 1] << 8)
+                | (byte_list[offset + 2] << 16)
+                | (byte_list[offset + 3] << 24)
+            )
+            delta = None
+            is_inc = False
+            if prev_bytes and len(prev_bytes) >= offset + 4:
+                prev_val32 = (
+                    prev_bytes[offset]
+                    | (prev_bytes[offset + 1] << 8)
+                    | (prev_bytes[offset + 2] << 16)
+                    | (prev_bytes[offset + 3] << 24)
+                )
+                delta = val32 - prev_val32
+                if 1 <= delta <= 150:
+                    is_inc = True
+
+            if is_inc or (10 <= val32 <= 200000 and delta is not None and delta != 0):
+                candidates.append({
+                    "offset": offset,
+                    "byte_len": 4,
+                    "type": "uint32LE",
+                    "value": val32,
+                    "delta": delta,
+                    "is_increment": is_inc
+                })
+
+        return candidates
+
     def _process_characteristic_data(self, service_uuid: str, char_uuid: str, data: bytes, direction: str = "RX", note: Optional[str] = None):
         if not data:
             return
@@ -765,7 +829,9 @@ class BLEManager:
         hex_str = " ".join(f"{b:02X}" for b in byte_list)
         short_c = normalize_uuid(char_uuid).upper()
 
-        decoded_summary = self._decode_little_endian(byte_list)
+        # Análisis de secuencias Little-Endian y candidatos para Sniffer
+        step_candidates = self._analyze_step_candidates(char_uuid, byte_list)
+        decoded_summary = self._decode_little_endian(byte_list, step_candidates)
 
         # 1. Heart Rate GATT Estándar (0x2A37)
         if short_c == "2A37" or short_c == self.custom_hr_uuid.upper():
@@ -788,15 +854,18 @@ class BLEManager:
 
             if 30 <= bpm <= 240:
                 self.current_hr = bpm
-                database.save_heart_rate(bpm=bpm, contact=contact, rr_interval_ms=rr_ms)
-                note = f"Pulso: {bpm} BPM"
+                self.has_real_hr = True
+                database.save_heart_rate(bpm=bpm, contact=contact, rr_interval_ms=rr_ms, source="Galaxy Fit3 BLE (Confirmado)")
+                note = f"Pulso real: {bpm} BPM"
 
         # 2. Battery Service GATT (0x2A19)
-        elif short_c == "2A19":
+        elif short_c == "2A19" or "00002a19" in char_uuid.lower():
             level = byte_list[0]
-            self.battery_level = min(max(level, 0), 100)
-            database.save_battery(self.battery_level)
-            note = f"Batería: {self.battery_level}%"
+            if 0 <= level <= 100:
+                self.battery_level = level
+                self.has_real_battery = True
+                database.save_battery(self.battery_level)
+                note = f"Batería real: {self.battery_level}%"
 
         # 3. Device Info (0x2A24 / 0x2A26 / 0x2A29)
         elif short_c == "2A24":
@@ -807,30 +876,66 @@ class BLEManager:
             note = f"Firmware: {self.device_firmware}"
         elif short_c == "2A29":
             self.device_manufacturer = data.decode(errors="ignore").strip()
-            note = f"Fabricante: {self.device_firmware}"
+            note = f"Fabricante: {self.device_manufacturer}"
 
-        # 4. Mapeo Heurístico o Propietario Samsung de Pasos (FE A1 ... o UUID asignado)
-        elif (short_c == self.custom_steps_uuid.upper()) or (len(byte_list) >= 6 and byte_list[0] == 0xFE and byte_list[1] == 0xA1):
-            offset = 2 if (byte_list[0] == 0xFE and byte_list[1] == 0xA1) else 0
-            if len(byte_list) >= offset + 4:
+        # 4. Mapeo Configurable de Pasos (UUID / Offset / Bytes seleccionados en la UI)
+        is_mapped_steps_char = (
+            short_c == self.custom_steps_uuid.upper()
+            or char_uuid.lower() == self.custom_steps_uuid.lower()
+            or (self.custom_steps_uuid.upper() in short_c)
+        )
+
+        if is_mapped_steps_char:
+            offset = self.custom_steps_offset
+            byte_len = self.custom_steps_bytes # 2 o 4
+            steps = None
+            if byte_len == 2 and len(byte_list) >= offset + 2:
+                steps = byte_list[offset] | (byte_list[offset + 1] << 8)
+            elif byte_len == 4 and len(byte_list) >= offset + 4:
                 steps = (
                     byte_list[offset]
                     | (byte_list[offset + 1] << 8)
                     | (byte_list[offset + 2] << 16)
                     | (byte_list[offset + 3] << 24)
                 )
-                if 0 <= steps <= 150000:
-                    self.today_steps = steps
-                    self.today_calories = round(steps * 0.042, 1)
-                    self.today_distance = round(steps * 0.74, 1)
-                    self.today_active_minutes = max(self.today_active_minutes, int(steps / 115))
-                    database.save_steps(
-                        steps=self.today_steps,
-                        calories=self.today_calories,
-                        distance=self.today_distance,
-                        active_minutes=self.today_active_minutes
-                    )
-                    note = f"Pasos decodificados: {self.today_steps}"
+
+            if steps is not None and 0 <= steps <= 250000:
+                self.today_steps = steps
+                self.has_real_steps = True
+                self.today_calories = round(steps * 0.042, 1)
+                self.today_distance = round(steps * 0.74, 1)
+                self.today_active_minutes = max(self.today_active_minutes or 0, int(steps / 115))
+                database.save_steps(
+                    steps=self.today_steps,
+                    calories=self.today_calories,
+                    distance=self.today_distance,
+                    active_minutes=self.today_active_minutes,
+                    source="Galaxy Fit3 BLE (Confirmado)"
+                )
+                note = f"Pasos confirmados: {steps}"
+
+        # Fallback heurístico para tramas con prefijo Samsung FE A1
+        elif len(byte_list) >= 6 and byte_list[0] == 0xFE and byte_list[1] == 0xA1:
+            steps = (
+                byte_list[2]
+                | (byte_list[3] << 8)
+                | (byte_list[4] << 16)
+                | (byte_list[5] << 24)
+            )
+            if 0 <= steps <= 250000:
+                self.today_steps = steps
+                self.has_real_steps = True
+                self.today_calories = round(steps * 0.042, 1)
+                self.today_distance = round(steps * 0.74, 1)
+                self.today_active_minutes = max(self.today_active_minutes or 0, int(steps / 115))
+                database.save_steps(
+                    steps=self.today_steps,
+                    calories=self.today_calories,
+                    distance=self.today_distance,
+                    active_minutes=self.today_active_minutes,
+                    source="Galaxy Fit3 BLE (Confirmado)"
+                )
+                note = f"Pasos decodificados: {self.today_steps}"
 
         # 5. Mapeo Heurístico de Fases de Sueño (FE A2 ...)
         elif (short_c == self.custom_sleep_uuid.upper()) or (len(byte_list) >= 6 and byte_list[0] == 0xFE and byte_list[1] == 0xA2):
@@ -841,6 +946,7 @@ class BLEManager:
                 rem = byte_list[offset + 2]
                 awake = byte_list[offset + 3]
                 now_date = datetime.now().strftime("%Y-%m-%d")
+                self.has_real_sleep = True
                 database.save_sleep_session(
                     start_time=f"{now_date}T00:15:00",
                     end_time=f"{now_date}T07:20:00",
@@ -848,7 +954,8 @@ class BLEManager:
                     light=light,
                     rem=rem,
                     awake=awake,
-                    score=min(98, 65 + int(deep / 4))
+                    score=min(98, 65 + int(deep / 4)),
+                    source="Galaxy Fit3 BLE (Confirmado)"
                 )
                 note = f"Sueño RX: Prof {deep}m / Lig {light}m / REM {rem}m"
 
@@ -857,8 +964,12 @@ class BLEManager:
             spo2 = byte_list[2]
             if 85 <= spo2 <= 100:
                 self.current_spo2 = spo2
-                database.save_spo2(spo2)
-                note = f"SpO2: {spo2}%"
+                self.has_real_spo2 = True
+                database.save_spo2(spo2, source="Galaxy Fit3 BLE (Confirmado)")
+                note = f"SpO2 real: {spo2}%"
+
+        # Actualizar cache de último payload para comparación de deltas
+        self._last_char_payloads[char_uuid] = bytes(byte_list)
 
         # Guardar paquete en SQLite
         database.save_ble_packet(
@@ -886,12 +997,13 @@ class BLEManager:
             "raw_bytes": byte_list,
             "utf8_preview": self._bytes_to_utf8(byte_list),
             "decoded_summary": decoded_summary,
+            "step_candidates": step_candidates,
             "note": note
         }
         asyncio.create_task(self.broadcast_event("ble_packet", packet_payload))
         asyncio.create_task(self.broadcast_event("telemetry_update", self.get_telemetry()))
 
-    def _decode_little_endian(self, bytes_arr: List[int]) -> str:
+    def _decode_little_endian(self, bytes_arr: List[int], candidates: Optional[List[Dict[str, Any]]] = None) -> str:
         if not bytes_arr:
             return "Vacío"
         parts = [f"u8[0]={bytes_arr[0]}"]
@@ -903,6 +1015,13 @@ class BLEManager:
             u32_0 = bytes_arr[0] | (bytes_arr[1] << 8) | (bytes_arr[2] << 16) | (bytes_arr[3] << 24)
             parts.append(f"u16LE[2]={u16_2}")
             parts.append(f"u32LE[0]={u32_0}")
+
+        if candidates:
+            inc_items = [c for c in candidates if c.get("is_increment")]
+            if inc_items:
+                top = inc_items[0]
+                parts.append(f"⚡DELTA: +{top['delta']} (off {top['offset']} {top['type']}={top['value']})")
+
         return " | ".join(parts)
 
     def _bytes_to_utf8(self, bytes_arr: List[int]) -> str:
@@ -918,11 +1037,22 @@ class BLEManager:
                 await self.disconnect()
 
             self.connection_state = "simulating"
-            self.connected_device_name = "Galaxy Fit3 (78DC)"
+            self.connected_device_name = "Galaxy Fit3 (78DC) [Simulación]"
             self.device_model = "SM-R390"
             self.device_manufacturer = "Samsung Electronics"
             self.device_firmware = "R390XXU0AXB4"
             self.battery_level = 86
+            self.has_real_battery = True
+            self.has_real_steps = True
+            self.has_real_hr = True
+            self.has_real_spo2 = True
+            self.has_real_sleep = True
+            self.today_steps = 6842
+            self.today_calories = 287.4
+            self.today_distance = 5063.0
+            self.today_active_minutes = 54
+            self.current_hr = 74
+            self.current_spo2 = 98
             self.last_status_message = "Modo Simulación activo: Generando telemetría realista y tramas BLE."
 
             self._setup_mock_services()
@@ -934,11 +1064,12 @@ class BLEManager:
                 self._mock_task.cancel()
                 self._mock_task = None
 
-            # Limpiar entradas simuladas
+            # Limpiar entradas simuladas y restaurar telemetría real
             self.scanned_devices = {k: v for k, v in self.scanned_devices.items() if not k.startswith("MOCK")}
             self.connection_state = "disconnected"
             self.connected_device_name = "Sin vincular"
-            self.last_status_message = "Modo Simulación desactivado. Listo para conectar con hardware físico."
+            self.last_status_message = "Modo Simulación desactivado. Esperando lecturas BLE reales del reloj."
+            self._load_initial_metrics()
 
         await self.broadcast_event("status_update", self.get_status())
         await self.broadcast_event("telemetry_update", self.get_telemetry())
@@ -1027,13 +1158,15 @@ class BLEManager:
                 break
 
             delta_hr = random.randint(-3, 4)
-            self.current_hr = min(max(self.current_hr + delta_hr, 62), 126)
+            self.current_hr = min(max((self.current_hr or 72) + delta_hr, 62), 126)
+            self.has_real_hr = True
             rr_raw = int((60.0 / self.current_hr) * 1024)
             hr_frame = bytes([0x16, self.current_hr, rr_raw & 0xFF, (rr_raw >> 8) & 0xFF])
             self._process_characteristic_data("0000180d-0000-1000-8000-00805f9b34fb", "00002a37-0000-1000-8000-00805f9b34fb", hr_frame)
 
             added_steps = random.randint(4, 16)
-            self.today_steps += added_steps
+            self.today_steps = (self.today_steps or 6800) + added_steps
+            self.has_real_steps = True
             new_s = self.today_steps
             steps_frame = bytes([
                 0xFE, 0xA1,
@@ -1052,6 +1185,7 @@ class BLEManager:
             "connected_device_name": self.connected_device_name,
             "connected_device_address": self.connected_device_address,
             "battery_level": self.battery_level,
+            "has_real_battery": self.has_real_battery,
             "last_status_message": self.last_status_message,
             "is_mock_mode": self.is_mock_mode,
             "device_info": {
@@ -1060,20 +1194,40 @@ class BLEManager:
                 "firmware": self.device_firmware,
                 "rssi": self.last_rssi
             },
-            "active_subscriptions_count": len(self.active_subscriptions)
+            "active_subscriptions_count": len(self.active_subscriptions),
+            "mapping": {
+                "steps_uuid": self.custom_steps_uuid,
+                "steps_offset": self.custom_steps_offset,
+                "steps_bytes": self.custom_steps_bytes,
+                "hr_uuid": self.custom_hr_uuid
+            }
         }
 
     def get_telemetry(self) -> Dict[str, Any]:
         summary = database.get_today_summary()
+        has_real_s = self.has_real_steps or summary.get("has_real_steps", False)
+        has_real_b = self.has_real_battery or summary.get("has_real_battery", False)
+        has_real_h = self.has_real_hr or summary.get("has_real_hr", False)
+        has_real_sp = self.has_real_spo2 or summary.get("has_real_spo2", False)
+        has_real_sl = self.has_real_sleep or summary.get("has_real_sleep", False)
+
         return {
-            "steps": self.today_steps,
-            "calories": self.today_calories,
-            "distance_meters": self.today_distance,
-            "active_minutes": self.today_active_minutes,
-            "heart_rate_latest": self.current_hr,
-            "heart_rate_avg": summary.get("heart_rate_avg", self.current_hr),
-            "battery": self.battery_level,
-            "spo2": self.current_spo2,
-            "sleep": summary.get("sleep", {}),
-            "hr_chart": summary.get("hr_chart", [])
+            "has_real_steps": has_real_s,
+            "has_real_battery": has_real_b,
+            "has_real_hr": has_real_h,
+            "has_real_spo2": has_real_sp,
+            "has_real_sleep": has_real_sl,
+            "steps": self.today_steps if self.has_real_steps else (summary.get("steps") if has_real_s else None),
+            "calories": self.today_calories if self.has_real_steps else (summary.get("calories") if has_real_s else None),
+            "distance_meters": self.today_distance if self.has_real_steps else (summary.get("distance_meters") if has_real_s else None),
+            "active_minutes": self.today_active_minutes if self.has_real_steps else (summary.get("active_minutes") if has_real_s else None),
+            "heart_rate_latest": self.current_hr if self.has_real_hr else (summary.get("heart_rate_latest") if has_real_h else None),
+            "heart_rate_avg": summary.get("heart_rate_avg", self.current_hr) if has_real_h else None,
+            "battery": self.battery_level if self.has_real_battery else (summary.get("battery") if has_real_b else None),
+            "spo2": self.current_spo2 if self.has_real_spo2 else (summary.get("spo2") if has_real_sp else None),
+            "sleep": summary.get("sleep", {}) if has_real_sl else {"total_minutes": 0, "sleep_score": 0},
+            "hr_chart": summary.get("hr_chart", []) if has_real_h else [],
+            "custom_steps_uuid": self.custom_steps_uuid,
+            "custom_steps_offset": self.custom_steps_offset,
+            "custom_steps_bytes": self.custom_steps_bytes
         }
