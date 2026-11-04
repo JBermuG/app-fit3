@@ -438,17 +438,48 @@ class BLEManager:
                 if ble_device.details and isinstance(ble_device.details, tuple):
                     self._active_peripheral = ble_device.details[0]
 
-                self.client = BleakClient(
-                    ble_device,
-                    disconnected_callback=on_disconnect,
-                    timeout=20.0
-                )
-                
-                # CRÍTICO: En Bleak 1.0+, connect() retorna None (no booleano) si tiene éxito y lanza excepción si falla.
-                await self.client.connect()
-                
+                connected_ok = False
+                try:
+                    self.client = BleakClient(
+                        ble_device,
+                        disconnected_callback=on_disconnect,
+                        timeout=15.0
+                    )
+                    await self.client.connect()
+                    connected_ok = self.client.is_connected
+                except Exception as first_err:
+                    logger.warning(f"Primer intento de conexión a {address} falló ({first_err}). Intentando fallback via BleakScanner.find_device_by_address...")
+                    if self.client:
+                        try:
+                            await self.client.disconnect()
+                        except Exception:
+                            pass
+                        self.client = None
+
+                    # Fallback: intentar resolver nuevamente el BLEDevice mediante escaneo directo
+                    try:
+                        fresh_dev = await BleakScanner.find_device_by_address(address, timeout=5.0)
+                        if fresh_dev:
+                            logger.info(f"Fallback encontró BLEDevice fresco: {fresh_dev}")
+                            self.discovered_devices[address] = fresh_dev
+                            ble_device = fresh_dev
+                            if ble_device.details and isinstance(ble_device.details, tuple):
+                                self._active_peripheral = ble_device.details[0]
+                            self.client = BleakClient(
+                                ble_device,
+                                disconnected_callback=on_disconnect,
+                                timeout=15.0
+                            )
+                            await self.client.connect()
+                            connected_ok = self.client.is_connected
+                    except Exception as fb_err:
+                        logger.warning(f"Fallback de escaneo falló: {fb_err}")
+
+                    if not connected_ok:
+                        raise first_err
+
                 # Validar estado mediante is_connected
-                if self.client.is_connected:
+                if connected_ok and self.client and self.client.is_connected:
                     self.connected_device_address = address
                     self.connected_device_name = device_name
                     self.connection_state = "connected"
