@@ -1,0 +1,3465 @@
+==> ble_manager.py <==
+import asyncio
+import logging
+import traceback
+from typing import Dict, Any, List, Optional, Set
+from datetime import datetime
+import json
+
+from bleak import BleakScanner, BleakClient
+from bleak.backends.characteristic import BleakGATTCharacteristic
+from bleak.backends.device import BLEDevice
+
+# Importación condicional de CoreBluetooth para macOS
+try:
+    from CoreBluetooth import (
+        CBUUID,
+        CBPeripheral,
+        CBPeripheralStateConnected,
+    )
+    from Foundation import NSUUID, NSArray
+    from bleak.backends.corebluetooth.CentralManagerDelegate import CentralManagerDelegate
+    HAS_MACOS_COREBLUETOOTH = True
+except ImportError:
+    HAS_MACOS_COREBLUETOOTH = False
+
+import database
+
+logger = logging.getLogger("fit3.ble_manager")
+logging.basicConfig(level=logging.INFO)
+
+# MARK: - Constants & UUIDs
+STANDARD_UUIDS = {
+    "180d": "Heart Rate Service",
+    "2a37": "Heart Rate Measurement",
+    "2a38": "Body Sensor Location",
+    "180f": "Battery Service",
+    "2a19": "Battery Level",
+    "180a": "Device Information Service",
+    "2a29": "Manufacturer Name",
+    "2a24": "Model Number",
+    "2a26": "Firmware Revision",
+    "1814": "Running Speed & Cadence",
+    "2a53": "RSC Measurement",
+    "1802": "Immediate Alert",
+    "2a06": "Alert Level"
+}
+
+# UUIDs de servicios típicos de wearables / Samsung para retrieveConnectedPeripherals
+CONNECTED_QUERY_SERVICES = [
+    "180D", "180F", "180A", "1812", "1800", "1801", "1814",
+    "FEEE", "FD59", "FD69", "FD5A", "FEE7", "FEE0", "FEE1"
+]
+
+def normalize_uuid(uuid_str: str) -> str:
+    cleaned = uuid_str.lower().strip()
+    if cleaned.startswith("0000") and cleaned.endswith("-0000-1000-8000-00805f9b34fb"):
+        return cleaned[4:8]
+    return cleaned
+
+class BLEManager:
+    HAS_MACOS_COREBLUETOOTH: bool = HAS_MACOS_COREBLUETOOTH
+
+    def __init__(self):
+        self.HAS_MACOS_COREBLUETOOTH = HAS_MACOS_COREBLUETOOTH
+        self.has_macos_corebluetooth = HAS_MACOS_COREBLUETOOTH
+        self.client: Optional[BleakClient] = None
+        self.connected_device_address: Optional[str] = None
+        self.connected_device_name: str = "Sin vincular"
+        self.connection_state: str = "disconnected" # disconnected, scanning, connecting, connected, simulating
+        self.last_status_message: str = "Listo para conectar con tu Samsung Galaxy Fit 3"
+
+        # Cache de objetos BLEDevice reales (CRÍTICO para macOS CoreBluetooth)
+        self.discovered_devices: Dict[str, BLEDevice] = {}
+        self.scanned_devices: Dict[str, Dict[str, Any]] = {}
+        self.discovered_services: List[Dict[str, Any]] = []
+        self.active_subscriptions: Set[str] = set()
+
+        # Manager de CoreBluetooth persistente
+        self._manager: Optional[Any] = None
+        self._active_peripheral: Optional[Any] = None
+        self._connect_lock = asyncio.Lock()
+
+        # Telemetría actual (Sin valores ficticios por defecto)
+        self.battery_level: Optional[int] = None
+        self.current_hr: Optional[int] = None
+        self.today_steps: Optional[int] = None
+        self.today_calories: Optional[float] = None
+        self.today_distance: Optional[float] = None
+        self.today_active_minutes: Optional[int] = None
+        self.current_spo2: Optional[int] = None
+        self.has_real_battery: bool = False
+        self.has_real_hr: bool = False
+        self.has_real_steps: bool = False
+        self.has_real_spo2: bool = False
+        self.has_real_sleep: bool = False
+
+        self.device_model: str = "SM-R390"
+        self.device_manufacturer: str = "Samsung Electronics"
+        self.device_firmware: str = "R390XXU0AXB4"
+        self.last_rssi: int = -51
+
+        # Mapeos dinámicos configurables para ingeniería inversa
+        self.custom_steps_uuid: str = database.get_setting("custom_steps_uuid", "FEA1")
+        self.custom_steps_offset: int = int(database.get_setting("custom_steps_offset", "0"))
+        self.custom_steps_bytes: int = int(database.get_setting("custom_steps_bytes", "4")) # 2 o 4 bytes
+        self.custom_hr_uuid: str = database.get_setting("custom_hr_uuid", "2A37")
+        self.custom_sleep_uuid: str = database.get_setting("custom_sleep_uuid", "FEA2")
+
+        # Historial de paquetes previos para cálculo de delta y detección de pasos
+        self._last_char_payloads: Dict[str, bytes] = {}
+
+        # Modo Simulación
+        self.is_mock_mode: bool = False
+        self._mock_task: Optional[asyncio.Task] = None
+        self._reconnect_task: Optional[asyncio.Task] = None
+
+        # Clientes WebSocket conectados
+        self.websocket_clients: Set[Any] = set()
+
+        # Inicializar métricas desde SQLite (solo si hay datos reales)
+        self._load_initial_metrics()
+
+    def _load_initial_metrics(self):
+        summary = database.get_today_summary()
+        self.has_real_steps = summary.get("has_real_steps", False)
+        self.has_real_hr = summary.get("has_real_hr", False)
+        self.has_real_battery = summary.get("has_real_battery", False)
+        self.has_real_spo2 = summary.get("has_real_spo2", False)
+        self.has_real_sleep = summary.get("has_real_sleep", False)
+
+        if self.has_real_steps:
+            self.today_steps = summary.get("steps")
+            self.today_calories = summary.get("calories")
+            self.today_distance = summary.get("distance_meters")
+            self.today_active_minutes = summary.get("active_minutes")
+        else:
+            self.today_steps = None
+            self.today_calories = None
+            self.today_distance = None
+            self.today_active_minutes = None
+
+        if self.has_real_hr:
+            self.current_hr = summary.get("heart_rate_latest")
+        else:
+            self.current_hr = None
+
+        if self.has_real_battery:
+            self.battery_level = summary.get("battery")
+        else:
+            self.battery_level = None
+
+        if self.has_real_spo2:
+            self.current_spo2 = summary.get("spo2")
+        else:
+            self.current_spo2 = None
+
+    # MARK: - CoreBluetooth Manager Helper (macOS Native)
+
+    async def _get_central_manager(self) -> Optional[Any]:
+        """Obtiene o inicializa el CentralManagerDelegate de CoreBluetooth en macOS."""
+        if not HAS_MACOS_COREBLUETOOTH:
+            return None
+        if self._manager is None:
+            try:
+                self._manager = CentralManagerDelegate()
+                await self._manager.wait_until_ready()
+            except Exception as e:
+                logger.warning(f"No se pudo inicializar CentralManagerDelegate: {e}")
+                return None
+        else:
+            try:
+                await self._manager.wait_until_ready()
+            except Exception:
+                pass
+        return self._manager
+
+    # MARK: - WebSocket Broadcasting
+
+    async def register_websocket(self, ws: Any):
+        self.websocket_clients.add(ws)
+
+    async def unregister_websocket(self, ws: Any):
+        self.websocket_clients.discard(ws)
+
+    async def broadcast_event(self, event_type: str, data: Any):
+        if not self.websocket_clients:
+            return
+        payload = json.dumps({"type": event_type, "data": data, "timestamp": datetime.now().isoformat()})
+        disconnected = set()
+        for ws in self.websocket_clients:
+            try:
+                await ws.send_text(payload)
+            except Exception:
+                disconnected.add(ws)
+        self.websocket_clients.difference_update(disconnected)
+
+    # MARK: - Recuperar Reloj Ya Conectado al Mac (macOS Native)
+
+    async def retrieve_connected_peripherals(self) -> List[BLEDevice]:
+        """
+        Consulta directamente a CoreBluetooth por periféricos que YA están conectados
+        o enlazados a macOS Monterey, permitiendo conectar inmediatamente a la Galaxy Fit3 (78DC)
+        incluso si ha dejado de emitir anuncios BLE.
+        """
+        if not HAS_MACOS_COREBLUETOOTH:
+            return []
+
+        manager = await self._get_central_manager()
+        if not manager or not hasattr(manager, "central_manager"):
+            return []
+
+        retrieved_list: List[BLEDevice] = []
+        seen_addresses: Set[str] = set()
+
+        # 1. retrieveConnectedPeripheralsWithServices_
+        try:
+            cbuuids = [CBUUID.UUIDWithString_(s) for s in CONNECTED_QUERY_SERVICES]
+            connected_peripherals = manager.central_manager.retrieveConnectedPeripheralsWithServices_(cbuuids)
+            if connected_peripherals:
+                for p in connected_peripherals:
+                    addr = str(p.identifier().UUIDString())
+                    if addr in seen_addresses:
+                        continue
+                    seen_addresses.add(addr)
+                    raw_name = str(p.name()) if p.name() else "Galaxy Fit3 (78DC)"
+                    is_connected = (p.state() == CBPeripheralStateConnected)
+                    
+                    # Construir objeto BLEDevice real con details = (CBPeripheral, CentralManagerDelegate)
+                    device_obj = BLEDevice(
+                        address=addr,
+                        name=raw_name,
+                        details=(p, manager)
+                    )
+                    self.discovered_devices[addr] = device_obj
+                    retrieved_list.append(device_obj)
+
+                    upper_name = raw_name.upper()
+                    is_fit3 = (
+                        "FIT3" in upper_name
+                        or "78DC" in upper_name
+                        or "SM-R390" in upper_name
+                        or "GALAXY" in upper_name
+                        or "SAMSUNG" in upper_name
+                    )
+
+                    self.scanned_devices[addr] = {
+                        "address": addr,
+                        "name": raw_name,
+                        "rssi": -45 if is_connected else -58,
+                        "is_fit3": is_fit3,
+                        "is_connected_system": is_connected,
+                        "system_status": "Ya conectado a macOS" if is_connected else "Enlazado en el Mac",
+                        "services": ["180D", "180F", "FD5A"],
+                        "last_seen": datetime.now().isoformat()
+                    }
+                    logger.info(f"✅ Periférico recuperado de CoreBluetooth: {raw_name} ({addr}) - Estado: {is_connected}")
+        except Exception as e:
+            logger.warning(f"Error en retrieveConnectedPeripheralsWithServices_: {e}")
+
+        # 2. retrievePeripheralsWithIdentifiers_ usando UUID guardado previamente
+        saved_uuid = database.get_setting("last_fit3_uuid")
+        if saved_uuid and saved_uuid not in seen_addresses:
+            try:
+                nsuuid = NSUUID.alloc().initWithUUIDString_(saved_uuid)
+                if nsuuid:
+                    known_peripherals = manager.central_manager.retrievePeripheralsWithIdentifiers_([nsuuid])
+                    if known_peripherals:
+                        for p in known_peripherals:
+                            addr = str(p.identifier().UUIDString())
+                            if addr in seen_addresses:
+                                continue
+                            seen_addresses.add(addr)
+                            saved_name = database.get_setting("last_fit3_name", "Galaxy Fit3 (78DC)")
+                            raw_name = str(p.name()) if p.name() else saved_name
+                            is_connected = (p.state() == CBPeripheralStateConnected)
+
+                            device_obj = BLEDevice(
+                                address=addr,
+                                name=raw_name,
+                                details=(p, manager)
+                            )
+                            self.discovered_devices[addr] = device_obj
+                            retrieved_list.append(device_obj)
+
+                            self.scanned_devices[addr] = {
+                                "address": addr,
+                                "name": raw_name,
+                                "rssi": -45 if is_connected else -60,
+                                "is_fit3": True,
+                                "is_connected_system": is_connected,
+                                "system_status": "Ya conectado a macOS" if is_connected else "Enlazado previamente",
+                                "services": ["180D", "180F", "FD5A"],
+                                "last_seen": datetime.now().isoformat()
+                            }
+                            logger.info(f"✅ Periférico recuperado por NSUUID guardado: {raw_name} ({addr})")
+            except Exception as e:
+                logger.debug(f"Error en retrievePeripheralsWithIdentifiers_: {e}")
+
+        return retrieved_list
+
+    # MARK: - BLE Scanning
+
+    async def scan_devices(self, timeout: float = 5.0) -> List[Dict[str, Any]]:
+        if self.is_mock_mode:
+            return self.get_scanned_devices_list()
+
+        self.connection_state = "scanning"
+        self.last_status_message = "Escaneando dispositivos BLE cercanos..."
+        await self.broadcast_event("status_update", self.get_status())
+
+        # Limpiar lista anterior para no acumular datos obsoletos
+        self.scanned_devices.clear()
+        self.discovered_devices.clear()
+
+        # PASO A: Recuperar periféricos que ya están conectados o guardados en macOS
+        retrieved_mac = await self.retrieve_connected_peripherals()
+        if retrieved_mac:
+            self.last_status_message = f"Se detectó {len(retrieved_mac)} reloj/dispositivo ya enlazado al Mac. Escaneando anuncios..."
+            await self.broadcast_event("status_update", self.get_status())
+
+        # PASO B: Escaneo estándar de anuncios activos con BleakScanner
+        try:
+            discovered = await BleakScanner.discover(timeout=timeout, return_adv=True)
+            for address, (device, adv_data) in discovered.items():
+                # Guardar el objeto BLEDevice real en cache
+                self.discovered_devices[address] = device
+
+                name = device.name or adv_data.local_name or "Desconocido"
+                upper_name = name.upper()
+                is_fit3 = (
+                    "FIT3" in upper_name
+                    or "78DC" in upper_name
+                    or "SM-R390" in upper_name
+                    or "GALAXY" in upper_name
+                    or "SAMSUNG" in upper_name
+                )
+                service_uuids = [normalize_uuid(u) for u in adv_data.service_uuids]
+
+                # Si ya existía por retrieveConnectedPeripherals, preservar su marca de conexión
+                prev = self.scanned_devices.get(address)
+                is_conn_sys = prev.get("is_connected_system", False) if prev else False
+
+                self.scanned_devices[address] = {
+                    "address": address,
+                    "name": name,
+                    "rssi": adv_data.rssi if adv_data.rssi is not None else -70,
+                    "is_fit3": is_fit3 or (prev.get("is_fit3", False) if prev else False),
+                    "is_connected_system": is_conn_sys,
+                    "system_status": "Ya conectado a macOS" if is_conn_sys else "Anunciando vía BLE",
+                    "services": service_uuids or (prev.get("services", []) if prev else []),
+                    "last_seen": datetime.now().isoformat()
+                }
+
+            self.connection_state = "connected" if (self.client and self.client.is_connected) else "disconnected"
+            self.last_status_message = f"Escaneo completado. {len(self.scanned_devices)} dispositivos encontrados."
+        except Exception as e:
+            logger.error(f"Aviso durante escaneo de anuncios: {e}")
+            self.connection_state = "connected" if (self.client and self.client.is_connected) else "disconnected"
+            self.last_status_message = f"Escaneo finalizado ({len(self.scanned_devices)} dispositivos listos)."
+
+        await self.broadcast_event("status_update", self.get_status())
+        return self.get_scanned_devices_list()
+
+    def get_scanned_devices_list(self) -> List[Dict[str, Any]]:
+        devices: List[Dict[str, Any]] = []
+        for d in self.scanned_devices.values():
+            addr = d.get("address", "")
+            # REGLA 3: Si el modo simulación está apagado, jamás mostrar dispositivos con direcciones mock
+            if not self.is_mock_mode:
+                if "MOCK" in addr or addr.startswith("AA:BB") or addr == "F9:A2:78:DC:39:00":
+                    continue
+            devices.append(d)
+
+        # Destacar al inicio:
+        # 1. Periféricos ya conectados a macOS
+        # 2. Periféricos Galaxy Fit3
+        # 3. Mayor RSSI
+        devices.sort(key=lambda d: (
+            not d.get("is_connected_system", False),
+            not d.get("is_fit3", False),
+            -d.get("rssi", -100)
+        ))
+        return devices
+
+    # MARK: - Connection Management (Pass Real BLEDevice)
+
+    async def connect(self, address: str) -> bool:
+        async with self._connect_lock:
+            if self.is_mock_mode:
+                await self.toggle_mock_mode(False)
+
+            # Si ya estamos conectados a esta misma dirección, retornar éxito inmediato
+            if self.client and self.client.is_connected and self.connected_device_address == address:
+                logger.info(f"Ya conectado previamente a {address}.")
+                return True
+
+            if self._reconnect_task:
+                self._reconnect_task.cancel()
+                self._reconnect_task = None
+
+            if self.client and self.client.is_connected:
+                await self.disconnect()
+
+            # REGLA 1: Obtener el objeto BLEDevice real cacheado
+            ble_device = self.discovered_devices.get(address)
+
+            # Si no estaba en cache (por ejemplo, tras reinicio), intentar recuperarlo nativamente vía CoreBluetooth
+            if ble_device is None:
+                logger.info(f"Buscando BLEDevice para {address} mediante CoreBluetooth...")
+                await self.retrieve_connected_peripherals()
+                ble_device = self.discovered_devices.get(address)
+
+            if ble_device is None:
+                err = f"No se encontró el objeto BLEDevice para '{address}'. Ejecuta un escaneo primero."
+                logger.error(err)
+                self.last_status_message = err
+                await self.broadcast_event("status_update", self.get_status())
+                raise Exception(err)
+
+            self.connection_state = "connecting"
+            device_name = ble_device.name or self.scanned_devices.get(address, {}).get("name", "Galaxy Fit3 (78DC)")
+            self.last_status_message = f"Conectando a {device_name} ({address})..."
+            await self.broadcast_event("status_update", self.get_status())
+
+            def on_disconnect(client: Any = None):
+                addr = getattr(client, "address", address) if client else address
+                logger.warning(f"Periférico {addr} desconectado.")
+                if self.connection_state == "connected":
+                    self.connection_state = "disconnected"
+                    self.last_status_message = "Conexión perdida con el reloj. Intentando reconexión..."
+                    asyncio.create_task(self.broadcast_event("status_update", self.get_status()))
+                    if not self._reconnect_task or self._reconnect_task.done():
+                        self._reconnect_task = asyncio.create_task(self._auto_reconnect_loop(address))
+
+            try:
+                logger.info(f"Instanciando BleakClient con BLEDevice real: {ble_device} (details={ble_device.details})")
+                
+                # CRÍTICO: Referencia fuerte al CBPeripheral en la clase para evitar recolección por ARC/PyObjC
+                if ble_device.details and isinstance(ble_device.details, tuple):
+                    self._active_peripheral = ble_device.details[0]
+
+                self.client = BleakClient(
+                    ble_device,
+                    disconnected_callback=on_disconnect,
+                    timeout=20.0
+                )
+                
+                # CRÍTICO: En Bleak 1.0+, connect() retorna None (no booleano) si tiene éxito y lanza excepción si falla.
+                await self.client.connect()
+                
+                # Validar estado mediante is_connected
+                if self.client.is_connected:
+                    self.connected_device_address = address
+                    self.connected_device_name = device_name
+                    self.connection_state = "connected"
+                    self.last_status_message = f"Conectado a {self.connected_device_name}. Enumerando servicios GATT..."
+                    logger.info(f"✅ Conexión exitosa con {self.connected_device_name} ({address})")
+                    
+                    # Guardar UUID en base de datos para recuperación automática instantánea
+                    database.save_setting("last_fit3_uuid", address)
+                    database.save_setting("last_fit3_name", device_name)
+
+                    await self.broadcast_event("status_update", self.get_status())
+
+                    # Enumerar servicios y características
+                    await self._discover_gatt_services()
+
+                    # Suscripción automática a Heart Rate y Batería si están disponibles
+                    await self._auto_subscribe_essential_services()
+
+                    return True
+                else:
+                    raise Exception("El cliente BLE no confirmó el estado conectado (is_connected=False).")
+            except Exception as e:
+                tb = traceback.format_exc()
+                logger.error(f"❌ Error detallado al conectar con {address}:\n{tb}")
+                self.connection_state = "disconnected"
+                self._active_peripheral = None
+                if self.client:
+                    try:
+                        await self.client.disconnect()
+                    except Exception:
+                        pass
+                    self.client = None
+                
+                raw_err = str(e) or type(e).__name__
+                hint = ""
+                lower_err = raw_err.lower()
+                if "denied" in lower_err or "unauthorized" in lower_err:
+                    hint = " [Permiso denegado: Ve a Ajustes del Sistema > Privacidad y Seguridad > Bluetooth y habilita Terminal / Python]"
+                elif "not found" in lower_err:
+                    hint = " [Dispositivo no encontrado en BLE: Asegúrate de que el reloj esté encendido o enlazado al Mac]"
+
+                self.last_status_message = f"Error al conectar: {raw_err}{hint}"
+                await self.broadcast_event("status_update", self.get_status())
+                raise Exception(self.last_status_message)
+
+    async def disconnect(self):
+        if self._reconnect_task:
+            self._reconnect_task.cancel()
+            self._reconnect_task = None
+
+        if self.client:
+            try:
+                if self.client.is_connected:
+                    await self.client.disconnect()
+            except Exception as e:
+                logger.debug(f"Aviso al desconectar: {e}")
+            finally:
+                self.client = None
+
+        self._active_peripheral = None
+        self.connected_device_address = None
+        self.connection_state = "disconnected"
+        self.active_subscriptions.clear()
+        self.last_status_message = "Reloj desconectado."
+        await self.broadcast_event("status_update", self.get_status())
+
+    async def _auto_reconnect_loop(self, address: str):
+        """Intenta reconectar automáticamente si el reloj se aleja y vuelve."""
+        retry_interval = 4.0
+        while self.connection_state == "disconnected" and not self.is_mock_mode:
+            logger.info(f"Reintentando conexión con {address}...")
+            self.last_status_message = "Buscando Galaxy Fit 3 para reconexión automática..."
+            await self.broadcast_event("status_update", self.get_status())
+            try:
+                # Primero recuperar de CoreBluetooth
+                await self.retrieve_connected_peripherals()
+                if address in self.discovered_devices:
+                    ok = await self.connect(address)
+                    if ok:
+                        logger.info("Reconexión automática exitosa!")
+                        return
+            except Exception as e:
+                logger.debug(f"Fallo temporal en reconexión: {e}")
+            await asyncio.sleep(retry_interval)
+
+    # MARK: - GATT Discovery & Subscriptions
+
+    async def _discover_gatt_services(self):
+        if not self.client or not self.client.is_connected:
+            return
+
+        self.discovered_services.clear()
+        services = self.client.services
+
+        for service in services:
+            short_s_uuid = normalize_uuid(service.uuid)
+            s_name = STANDARD_UUIDS.get(short_s_uuid, f"Servicio Propietario ({short_s_uuid.upper()})")
+            is_proprietary = short_s_uuid not in STANDARD_UUIDS
+
+            chars_info = []
+            for char in service.characteristics:
+                short_c_uuid = normalize_uuid(char.uuid)
+                c_name = STANDARD_UUIDS.get(short_c_uuid, f"Característica {short_c_uuid.upper()}")
+                props = char.properties
+
+                can_read = "read" in props
+                can_write = ("write" in props) or ("write-without-response" in props)
+                can_notify = ("notify" in props) or ("indicate" in props)
+
+                # Si es una característica estándar segura de información, leer su valor inicial
+                if can_read and short_c_uuid in ["2a00", "2a19", "2a24", "2a26", "2a29", "2a38"]:
+                    try:
+                        val = await asyncio.wait_for(self.client.read_gatt_char(char.uuid), timeout=1.5)
+                        last_hex = val.hex().upper()
+                        self._process_characteristic_data(service.uuid, char.uuid, val, direction="RX", note="Lectura inicial")
+                    except Exception as e:
+                        logger.debug(f"Lectura inicial omitida para {char.uuid}: {e}")
+
+                chars_info.append({
+                    "service_uuid": service.uuid,
+                    "uuid": char.uuid,
+                    "short_uuid": short_c_uuid.upper(),
+                    "name": c_name,
+                    "properties": props,
+                    "can_read": can_read,
+                    "can_write": can_write,
+                    "can_notify": can_notify,
+                    "is_notifying": char.uuid in self.active_subscriptions,
+                    "last_hex": last_hex
+                })
+
+            self.discovered_services.append({
+                "uuid": service.uuid,
+                "short_uuid": short_s_uuid.upper(),
+                "name": s_name,
+                "is_proprietary": is_proprietary,
+                "characteristics": chars_info
+            })
+
+        self.last_status_message = f"GATT listo ({len(self.discovered_services)} servicios enumerados)."
+        await self.broadcast_event("services_discovered", self.discovered_services)
+
+    async def _auto_subscribe_essential_services(self):
+        """
+        1. Lee directamente el nivel de batería real en 0x2A19 (GATT estándar 0x180F).
+        2. Suscribe notificaciones a Heart Rate (0x2A37) y Batería (0x2A19).
+        3. Suscribe automáticamente a todas las características notificables de los servicios propietarios de Samsung (UUIDs FEE..., FD..., etc.).
+        """
+        if not self.client or not self.client.is_connected:
+            return
+
+        # PASO 1: Lectura directa de Batería real (0x2A19)
+        for s in self.discovered_services:
+            for c in s["characteristics"]:
+                short_c = c["short_uuid"].lower()
+                full_c = c["uuid"].lower()
+                if short_c == "2a19" or "00002a19" in full_c:
+                    try:
+                        logger.info(f"🔋 Leyendo porcentaje de batería real en {c['uuid']}...")
+                        val = await asyncio.wait_for(self.client.read_gatt_char(c["uuid"]), timeout=3.0)
+                        if val and len(val) >= 1:
+                            real_bat = int(val[0])
+                            if 0 <= real_bat <= 100:
+                                self.battery_level = real_bat
+                                self.has_real_battery = True
+                                database.save_battery(self.battery_level)
+                                c["last_hex"] = val.hex().upper()
+                                logger.info(f"✅ Batería real confirmada del reloj: {self.battery_level}%")
+                                await self.broadcast_event("telemetry_update", self.get_telemetry())
+                    except Exception as e:
+                        logger.warning(f"Aviso al leer batería directa 0x2A19: {e}")
+
+        # PASO 2: Suscribir a Heart Rate, Batería y Servicios Propietarios de Samsung
+        for s in self.discovered_services:
+            short_s = s["short_uuid"].lower()
+            is_samsung_service = (
+                s.get("is_proprietary", False)
+                or short_s.startswith("fe")
+                or short_s.startswith("fd")
+                or "0000fee" in s["uuid"].lower()
+                or "0000fd" in s["uuid"].lower()
+            )
+
+            for c in s["characteristics"]:
+                short_c = c["short_uuid"].lower()
+                full_c = c["uuid"].lower()
+                can_notify = c.get("can_notify", False)
+
+                if not can_notify:
+                    continue
+
+                should_subscribe = False
+                # Estándares esenciales
+                if short_c in ["2a37", "2a19", "2a53"]:
+                    should_subscribe = True
+                # Propietarios Samsung (FEE..., FD...)
+                elif is_samsung_service or short_c.startswith("fe") or short_c.startswith("fd") or "fee" in full_c or "fd" in full_c:
+                    should_subscribe = True
+
+                if should_subscribe and c["uuid"] not in self.active_subscriptions:
+                    logger.info(f"📡 Suscribiendo automáticamente a característica: {c['name']} ({c['uuid']})")
+                    await self.start_notify(c["uuid"])
+                    await asyncio.sleep(0.08)
+
+        await self.broadcast_event("telemetry_update", self.get_telemetry())
+        await self.broadcast_event("status_update", self.get_status())
+
+    async def start_notify(self, char_uuid: str) -> bool:
+        if not self.client or not self.client.is_connected:
+            return False
+
+        def notification_handler(sender: BleakGATTCharacteristic, data: bytearray):
+            raw = bytes(data)
+            self._process_characteristic_data(
+                service_uuid=sender.service_uuid if hasattr(sender, "service_uuid") else "Unknown",
+                char_uuid=sender.uuid,
+                data=raw,
+                direction="RX",
+                note="Notificación en vivo"
+            )
+
+        try:
+            await self.client.start_notify(char_uuid, notification_handler)
+            self.active_subscriptions.add(char_uuid)
+            self._update_char_notify_state(char_uuid, True)
+            self.last_status_message = f"Suscripción activa para {char_uuid}."
+            await self.broadcast_event("status_update", self.get_status())
+            return True
+        except Exception as e:
+            logger.error(f"Error al suscribir notificaciones en {char_uuid}: {e}")
+            return False
+
+    async def stop_notify(self, char_uuid: str) -> bool:
+        if not self.client or not self.client.is_connected:
+            return False
+        try:
+            await self.client.stop_notify(char_uuid)
+            self.active_subscriptions.discard(char_uuid)
+            self._update_char_notify_state(char_uuid, False)
+            self.last_status_message = f"Suscripción detenida en {char_uuid}."
+            await self.broadcast_event("status_update", self.get_status())
+            return True
+        except Exception as e:
+            logger.error(f"Error al detener notificación {char_uuid}: {e}")
+            return False
+
+    async def subscribe_all_notifiable(self) -> int:
+        subscribed_count = 0
+        for s in self.discovered_services:
+            for c in s["characteristics"]:
+                if c["can_notify"] and c["uuid"] not in self.active_subscriptions:
+                    ok = await self.start_notify(c["uuid"])
+                    if ok:
+                        subscribed_count += 1
+                        await asyncio.sleep(0.1)
+        self.last_status_message = f"Se activó notificación en {subscribed_count} características."
+        await self.broadcast_event("status_update", self.get_status())
+        return subscribed_count
+
+    async def read_characteristic(self, char_uuid: str) -> Optional[str]:
+        if not self.client or not self.client.is_connected:
+            return None
+        try:
+            val = await self.client.read_gatt_char(char_uuid)
+            raw = bytes(val)
+            self._process_characteristic_data(service_uuid="ReadCmd", char_uuid=char_uuid, data=raw, direction="RX", note="Lectura manual")
+            return raw.hex().upper()
+        except Exception as e:
+            logger.error(f"Error al leer característica {char_uuid}: {e}")
+            return None
+
+    async def write_characteristic(self, char_uuid: str, hex_string: str) -> bool:
+        cleaned_hex = hex_string.replace("0x", "").replace(" ", "").replace("-", "")
+        try:
+            data = bytes.fromhex(cleaned_hex)
+        except ValueError:
+            self.last_status_message = "Formato Hexadecimal inválido."
+            return False
+
+        if self.is_mock_mode:
+            self._process_characteristic_data("MockService", char_uuid, data, direction="TX", note="Envío manual simulado")
+            self.last_status_message = f"TX simulado ({len(data)} bytes) hacia {char_uuid}."
+            await self.broadcast_event("status_update", self.get_status())
+            return True
+
+        if not self.client or not self.client.is_connected:
+            self.last_status_message = "Reloj no conectado para escribir."
+            return False
+
+        try:
+            await self.client.write_gatt_char(char_uuid, data)
+            self._process_characteristic_data("CustomCmd", char_uuid, data, direction="TX", note="Envío manual Hex")
+            self.last_status_message = f"Enviados {len(data)} bytes a {char_uuid}."
+            await self.broadcast_event("status_update", self.get_status())
+            return True
+        except Exception as e:
+            logger.error(f"Error al escribir en {char_uuid}: {e}")
+            self.last_status_message = f"Error al escribir: {str(e)}"
+            return False
+
+    def _update_char_notify_state(self, char_uuid: str, is_notifying: bool):
+        for s in self.discovered_services:
+            for c in s["characteristics"]:
+                if c["uuid"] == char_uuid:
+                    c["is_notifying"] = is_notifying
+
+    # MARK: - Packet Parsing & Reverse Engineering
+
+    def _analyze_step_candidates(self, char_uuid: str, byte_list: List[int]) -> List[Dict[str, Any]]:
+        """
+        Analiza secuencias de 2 y 4 bytes Little-Endian (uint16 / uint32) en cada offset.
+        Compara con el payload anterior de esta misma característica para calcular deltas.
+        Identifica secuencias que aumentan progresivamente (+1 a +150) o valores en rango de pasos diarios.
+        """
+        prev_bytes = self._last_char_payloads.get(char_uuid)
+        candidates = []
+        n = len(byte_list)
+
+        # 1. uint16 Little-Endian en offsets 0..n-2
+        for offset in range(0, n - 1):
+            val16 = byte_list[offset] | (byte_list[offset + 1] << 8)
+            delta = None
+            is_inc = False
+            if prev_bytes and len(prev_bytes) >= offset + 2:
+                prev_val16 = prev_bytes[offset] | (prev_bytes[offset + 1] << 8)
+                delta = val16 - prev_val16
+                if 1 <= delta <= 150:
+                    is_inc = True
+
+            if is_inc or (10 <= val16 <= 65000 and delta is not None and delta != 0):
+                candidates.append({
+                    "offset": offset,
+                    "byte_len": 2,
+                    "type": "uint16LE",
+                    "value": val16,
+                    "delta": delta,
+                    "is_increment": is_inc
+                })
+
+        # 2. uint32 Little-Endian en offsets 0..n-4
+        for offset in range(0, n - 3):
+            val32 = (
+                byte_list[offset]
+                | (byte_list[offset + 1] << 8)
+                | (byte_list[offset + 2] << 16)
+                | (byte_list[offset + 3] << 24)
+            )
+            delta = None
+            is_inc = False
+            if prev_bytes and len(prev_bytes) >= offset + 4:
+                prev_val32 = (
+                    prev_bytes[offset]
+                    | (prev_bytes[offset + 1] << 8)
+                    | (prev_bytes[offset + 2] << 16)
+                    | (prev_bytes[offset + 3] << 24)
+                )
+                delta = val32 - prev_val32
+                if 1 <= delta <= 150:
+                    is_inc = True
+
+            if is_inc or (10 <= val32 <= 200000 and delta is not None and delta != 0):
+                candidates.append({
+                    "offset": offset,
+                    "byte_len": 4,
+                    "type": "uint32LE",
+                    "value": val32,
+                    "delta": delta,
+                    "is_increment": is_inc
+                })
+
+        return candidates
+
+    def _process_characteristic_data(self, service_uuid: str, char_uuid: str, data: bytes, direction: str = "RX", note: Optional[str] = None):
+        if not data:
+            return
+
+        byte_list = list(data)
+        hex_str = " ".join(f"{b:02X}" for b in byte_list)
+        short_c = normalize_uuid(char_uuid).upper()
+
+        # Análisis de secuencias Little-Endian y candidatos para Sniffer
+        step_candidates = self._analyze_step_candidates(char_uuid, byte_list)
+        decoded_summary = self._decode_little_endian(byte_list, step_candidates)
+
+        # 1. Heart Rate GATT Estándar (0x2A37)
+        if short_c == "2A37" or short_c == self.custom_hr_uuid.upper():
+            flags = byte_list[0]
+            is_16bit = (flags & 0x01) != 0
+            contact = bool(flags & 0x02)
+            bpm = 0
+            offset = 1
+            if is_16bit and len(byte_list) >= 3:
+                bpm = byte_list[1] | (byte_list[2] << 8)
+                offset = 3
+            elif len(byte_list) >= 2:
+                bpm = byte_list[1]
+                offset = 2
+
+            rr_ms = None
+            if (flags & 0x10) and len(byte_list) >= offset + 2:
+                raw_rr = byte_list[offset] | (byte_list[offset + 1] << 8)
+                rr_ms = int((raw_rr / 1024.0) * 1000.0)
+
+            if 30 <= bpm <= 240:
+                self.current_hr = bpm
+                self.has_real_hr = True
+                database.save_heart_rate(bpm=bpm, contact=contact, rr_interval_ms=rr_ms, source="Galaxy Fit3 BLE (Confirmado)")
+                note = f"Pulso real: {bpm} BPM"
+
+        # 2. Battery Service GATT (0x2A19)
+        elif short_c == "2A19" or "00002a19" in char_uuid.lower():
+            level = byte_list[0]
+            if 0 <= level <= 100:
+                self.battery_level = level
+                self.has_real_battery = True
+                database.save_battery(self.battery_level)
+                note = f"Batería real: {self.battery_level}%"
+
+        # 3. Device Info (0x2A24 / 0x2A26 / 0x2A29)
+        elif short_c == "2A24":
+            self.device_model = data.decode(errors="ignore").strip()
+            note = f"Modelo: {self.device_model}"
+        elif short_c == "2A26":
+            self.device_firmware = data.decode(errors="ignore").strip()
+            note = f"Firmware: {self.device_firmware}"
+        elif short_c == "2A29":
+            self.device_manufacturer = data.decode(errors="ignore").strip()
+            note = f"Fabricante: {self.device_manufacturer}"
+
+        # 4. Mapeo Configurable de Pasos (UUID / Offset / Bytes seleccionados en la UI)
+        is_mapped_steps_char = (
+            short_c == self.custom_steps_uuid.upper()
+            or char_uuid.lower() == self.custom_steps_uuid.lower()
+            or (self.custom_steps_uuid.upper() in short_c)
+        )
+
+        if is_mapped_steps_char:
+            offset = self.custom_steps_offset
+            byte_len = self.custom_steps_bytes # 2 o 4
+            steps = None
+            if byte_len == 2 and len(byte_list) >= offset + 2:
+                steps = byte_list[offset] | (byte_list[offset + 1] << 8)
+            elif byte_len == 4 and len(byte_list) >= offset + 4:
+                steps = (
+                    byte_list[offset]
+                    | (byte_list[offset + 1] << 8)
+                    | (byte_list[offset + 2] << 16)
+                    | (byte_list[offset + 3] << 24)
+                )
+
+            if steps is not None and 0 <= steps <= 250000:
+                self.today_steps = steps
+                self.has_real_steps = True
+                self.today_calories = round(steps * 0.042, 1)
+                self.today_distance = round(steps * 0.74, 1)
+                self.today_active_minutes = max(self.today_active_minutes or 0, int(steps / 115))
+                database.save_steps(
+                    steps=self.today_steps,
+                    calories=self.today_calories,
+                    distance=self.today_distance,
+                    active_minutes=self.today_active_minutes,
+                    source="Galaxy Fit3 BLE (Confirmado)"
+                )
+                note = f"Pasos confirmados: {steps}"
+
+        # Fallback heurístico para tramas con prefijo Samsung FE A1
+        elif len(byte_list) >= 6 and byte_list[0] == 0xFE and byte_list[1] == 0xA1:
+            steps = (
+                byte_list[2]
+                | (byte_list[3] << 8)
+                | (byte_list[4] << 16)
+                | (byte_list[5] << 24)
+            )
+            if 0 <= steps <= 250000:
+                self.today_steps = steps
+                self.has_real_steps = True
+                self.today_calories = round(steps * 0.042, 1)
+                self.today_distance = round(steps * 0.74, 1)
+                self.today_active_minutes = max(self.today_active_minutes or 0, int(steps / 115))
+                database.save_steps(
+                    steps=self.today_steps,
+                    calories=self.today_calories,
+                    distance=self.today_distance,
+                    active_minutes=self.today_active_minutes,
+                    source="Galaxy Fit3 BLE (Confirmado)"
+                )
+                note = f"Pasos decodificados: {self.today_steps}"
+
+        # 5. Mapeo Heurístico de Fases de Sueño (FE A2 ...)
+        elif (short_c == self.custom_sleep_uuid.upper()) or (len(byte_list) >= 6 and byte_list[0] == 0xFE and byte_list[1] == 0xA2):
+            offset = 2 if (byte_list[0] == 0xFE and byte_list[1] == 0xA2) else 0
+            if len(byte_list) >= offset + 4:
+                deep = byte_list[offset]
+                light = byte_list[offset + 1] * 2
+                rem = byte_list[offset + 2]
+                awake = byte_list[offset + 3]
+                now_date = datetime.now().strftime("%Y-%m-%d")
+                self.has_real_sleep = True
+                database.save_sleep_session(
+                    start_time=f"{now_date}T00:15:00",
+                    end_time=f"{now_date}T07:20:00",
+                    deep=deep,
+                    light=light,
+                    rem=rem,
+                    awake=awake,
+                    score=min(98, 65 + int(deep / 4)),
+                    source="Galaxy Fit3 BLE (Confirmado)"
+                )
+                note = f"Sueño RX: Prof {deep}m / Lig {light}m / REM {rem}m"
+
+        # 6. SpO2 Heurístico (FE A3 ...)
+        elif len(byte_list) >= 3 and byte_list[0] == 0xFE and byte_list[1] == 0xA3:
+            spo2 = byte_list[2]
+            if 85 <= spo2 <= 100:
+                self.current_spo2 = spo2
+                self.has_real_spo2 = True
+                database.save_spo2(spo2, source="Galaxy Fit3 BLE (Confirmado)")
+                note = f"SpO2 real: {spo2}%"
+
+        # Actualizar cache de último payload para comparación de deltas
+        self._last_char_payloads[char_uuid] = bytes(byte_list)
+
+        # Guardar paquete en SQLite
+        database.save_ble_packet(
+            service_uuid=service_uuid,
+            char_uuid=char_uuid,
+            direction=direction,
+            hex_string=hex_str,
+            raw_bytes=byte_list,
+            decoded_summary=decoded_summary,
+            note=note
+        )
+
+        for s in self.discovered_services:
+            for c in s["characteristics"]:
+                if c["uuid"] == char_uuid:
+                    c["last_hex"] = hex_str
+
+        packet_payload = {
+            "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+            "service_uuid": service_uuid,
+            "char_uuid": char_uuid,
+            "short_uuid": short_c,
+            "direction": direction,
+            "hex_string": hex_str,
+            "raw_bytes": byte_list,
+            "utf8_preview": self._bytes_to_utf8(byte_list),
+            "decoded_summary": decoded_summary,
+            "step_candidates": step_candidates,
+            "note": note
+        }
+        asyncio.create_task(self.broadcast_event("ble_packet", packet_payload))
+        asyncio.create_task(self.broadcast_event("telemetry_update", self.get_telemetry()))
+
+    def _decode_little_endian(self, bytes_arr: List[int], candidates: Optional[List[Dict[str, Any]]] = None) -> str:
+        if not bytes_arr:
+            return "Vacío"
+        parts = [f"u8[0]={bytes_arr[0]}"]
+        if len(bytes_arr) >= 2:
+            u16_0 = bytes_arr[0] | (bytes_arr[1] << 8)
+            parts.append(f"u16LE[0]={u16_0}")
+        if len(bytes_arr) >= 4:
+            u16_2 = bytes_arr[2] | (bytes_arr[3] << 8)
+            u32_0 = bytes_arr[0] | (bytes_arr[1] << 8) | (bytes_arr[2] << 16) | (bytes_arr[3] << 24)
+            parts.append(f"u16LE[2]={u16_2}")
+            parts.append(f"u32LE[0]={u32_0}")
+
+        if candidates:
+            inc_items = [c for c in candidates if c.get("is_increment")]
+            if inc_items:
+                top = inc_items[0]
+                parts.append(f"⚡DELTA: +{top['delta']} (off {top['offset']} {top['type']}={top['value']})")
+
+        return " | ".join(parts)
+
+    def _bytes_to_utf8(self, bytes_arr: List[int]) -> str:
+        chars = [chr(b) if 32 <= b <= 126 else "." for b in bytes_arr]
+        return "".join(chars)
+
+    # MARK: - Mock Mode Simulation
+
+    async def toggle_mock_mode(self, enabled: bool):
+        self.is_mock_mode = enabled
+        if enabled:
+            if self.client and self.client.is_connected:
+                await self.disconnect()
+
+            self.connection_state = "simulating"
+            self.connected_device_name = "Galaxy Fit3 (78DC) [Simulación]"
+            self.device_model = "SM-R390"
+            self.device_manufacturer = "Samsung Electronics"
+            self.device_firmware = "R390XXU0AXB4"
+            self.battery_level = 86
+            self.has_real_battery = True
+            self.has_real_steps = True
+            self.has_real_hr = True
+            self.has_real_spo2 = True
+            self.has_real_sleep = True
+            self.today_steps = 6842
+            self.today_calories = 287.4
+            self.today_distance = 5063.0
+            self.today_active_minutes = 54
+            self.current_hr = 74
+            self.current_spo2 = 98
+            self.last_status_message = "Modo Simulación activo: Generando telemetría realista y tramas BLE."
+
+            self._setup_mock_services()
+
+            if not self._mock_task or self._mock_task.done():
+                self._mock_task = asyncio.create_task(self._mock_tick_loop())
+        else:
+            if self._mock_task:
+                self._mock_task.cancel()
+                self._mock_task = None
+
+            # Limpiar entradas simuladas y restaurar telemetría real
+            self.scanned_devices = {k: v for k, v in self.scanned_devices.items() if not k.startswith("MOCK")}
+            self.connection_state = "disconnected"
+            self.connected_device_name = "Sin vincular"
+            self.last_status_message = "Modo Simulación desactivado. Esperando lecturas BLE reales del reloj."
+            self._load_initial_metrics()
+
+        await self.broadcast_event("status_update", self.get_status())
+        await self.broadcast_event("telemetry_update", self.get_telemetry())
+
+    def _setup_mock_services(self):
+        self.discovered_services = [
+            {
+                "uuid": "0000180d-0000-1000-8000-00805f9b34fb",
+                "short_uuid": "180D",
+                "name": "Heart Rate Service",
+                "is_proprietary": False,
+                "characteristics": [
+                    {
+                        "service_uuid": "0000180d-0000-1000-8000-00805f9b34fb",
+                        "uuid": "00002a37-0000-1000-8000-00805f9b34fb",
+                        "short_uuid": "2A37",
+                        "name": "Heart Rate Measurement",
+                        "properties": ["notify"],
+                        "can_read": False,
+                        "can_write": False,
+                        "can_notify": True,
+                        "is_notifying": True,
+                        "last_hex": "16 4A E8 03"
+                    }
+                ]
+            },
+            {
+                "uuid": "0000180f-0000-1000-8000-00805f9b34fb",
+                "short_uuid": "180F",
+                "name": "Battery Service",
+                "is_proprietary": False,
+                "characteristics": [
+                    {
+                        "service_uuid": "0000180f-0000-1000-8000-00805f9b34fb",
+                        "uuid": "00002a19-0000-1000-8000-00805f9b34fb",
+                        "short_uuid": "2A19",
+                        "name": "Battery Level",
+                        "properties": ["read", "notify"],
+                        "can_read": True,
+                        "can_write": False,
+                        "can_notify": True,
+                        "is_notifying": True,
+                        "last_hex": "56"
+                    }
+                ]
+            },
+            {
+                "uuid": "0000fd5a-0000-1000-8000-00805f9b34fb",
+                "short_uuid": "FD5A",
+                "name": "Samsung Wearable Health Bus (Propietario)",
+                "is_proprietary": True,
+                "characteristics": [
+                    {
+                        "service_uuid": "0000fd5a-0000-1000-8000-00805f9b34fb",
+                        "uuid": "0000fea1-0000-1000-8000-00805f9b34fb",
+                        "short_uuid": "FEA1",
+                        "name": "Samsung Pedometer & Calories Frame",
+                        "properties": ["read", "write", "notify"],
+                        "can_read": True,
+                        "can_write": True,
+                        "can_notify": True,
+                        "is_notifying": True,
+                        "last_hex": "FE A1 BA 1A 00 00"
+                    },
+                    {
+                        "service_uuid": "0000fd5a-0000-1000-8000-00805f9b34fb",
+                        "uuid": "0000fea2-0000-1000-8000-00805f9b34fb",
+                        "short_uuid": "FEA2",
+                        "name": "Samsung Sleep Stages Telemetry",
+                        "properties": ["read", "notify"],
+                        "can_read": True,
+                        "can_write": False,
+                        "can_notify": True,
+                        "is_notifying": True,
+                        "last_hex": "FE A2 58 79 60 16"
+                    }
+                ]
+            }
+        ]
+
+    async def _mock_tick_loop(self):
+        import random
+        while self.is_mock_mode:
+            await asyncio.sleep(3.0)
+            if not self.is_mock_mode:
+                break
+
+            delta_hr = random.randint(-3, 4)
+            self.current_hr = min(max((self.current_hr or 72) + delta_hr, 62), 126)
+            self.has_real_hr = True
+            rr_raw = int((60.0 / self.current_hr) * 1024)
+            hr_frame = bytes([0x16, self.current_hr, rr_raw & 0xFF, (rr_raw >> 8) & 0xFF])
+            self._process_characteristic_data("0000180d-0000-1000-8000-00805f9b34fb", "00002a37-0000-1000-8000-00805f9b34fb", hr_frame)
+
+            added_steps = random.randint(4, 16)
+            self.today_steps = (self.today_steps or 6800) + added_steps
+            self.has_real_steps = True
+            new_s = self.today_steps
+            steps_frame = bytes([
+                0xFE, 0xA1,
+                new_s & 0xFF,
+                (new_s >> 8) & 0xFF,
+                (new_s >> 16) & 0xFF,
+                (new_s >> 24) & 0xFF
+            ])
+            self._process_characteristic_data("0000fd5a-0000-1000-8000-00805f9b34fb", "0000fea1-0000-1000-8000-00805f9b34fb", steps_frame)
+
+    # MARK: - Status & Telemetry DTOs
+
+    def get_status(self) -> Dict[str, Any]:
+        return {
+            "connection_state": self.connection_state,
+            "connected_device_name": self.connected_device_name,
+            "connected_device_address": self.connected_device_address,
+            "battery_level": self.battery_level,
+            "has_real_battery": self.has_real_battery,
+            "last_status_message": self.last_status_message,
+            "is_mock_mode": self.is_mock_mode,
+            "device_info": {
+                "model": self.device_model,
+                "manufacturer": self.device_manufacturer,
+                "firmware": self.device_firmware,
+                "rssi": self.last_rssi
+            },
+            "active_subscriptions_count": len(self.active_subscriptions),
+            "mapping": {
+                "steps_uuid": self.custom_steps_uuid,
+                "steps_offset": self.custom_steps_offset,
+                "steps_bytes": self.custom_steps_bytes,
+                "hr_uuid": self.custom_hr_uuid
+            }
+        }
+
+    def get_telemetry(self) -> Dict[str, Any]:
+        summary = database.get_today_summary()
+        has_real_s = self.has_real_steps or summary.get("has_real_steps", False)
+        has_real_b = self.has_real_battery or summary.get("has_real_battery", False)
+        has_real_h = self.has_real_hr or summary.get("has_real_hr", False)
+        has_real_sp = self.has_real_spo2 or summary.get("has_real_spo2", False)
+        has_real_sl = self.has_real_sleep or summary.get("has_real_sleep", False)
+
+        return {
+            "has_real_steps": has_real_s,
+            "has_real_battery": has_real_b,
+            "has_real_hr": has_real_h,
+            "has_real_spo2": has_real_sp,
+            "has_real_sleep": has_real_sl,
+            "steps": self.today_steps if self.has_real_steps else (summary.get("steps") if has_real_s else None),
+            "calories": self.today_calories if self.has_real_steps else (summary.get("calories") if has_real_s else None),
+            "distance_meters": self.today_distance if self.has_real_steps else (summary.get("distance_meters") if has_real_s else None),
+            "active_minutes": self.today_active_minutes if self.has_real_steps else (summary.get("active_minutes") if has_real_s else None),
+            "heart_rate_latest": self.current_hr if self.has_real_hr else (summary.get("heart_rate_latest") if has_real_h else None),
+            "heart_rate_avg": summary.get("heart_rate_avg", self.current_hr) if has_real_h else None,
+            "battery": self.battery_level if self.has_real_battery else (summary.get("battery") if has_real_b else None),
+            "spo2": self.current_spo2 if self.has_real_spo2 else (summary.get("spo2") if has_real_sp else None),
+            "sleep": summary.get("sleep", {}) if has_real_sl else {"total_minutes": 0, "sleep_score": 0},
+            "hr_chart": summary.get("hr_chart", []) if has_real_h else [],
+            "custom_steps_uuid": self.custom_steps_uuid,
+            "custom_steps_offset": self.custom_steps_offset,
+            "custom_steps_bytes": self.custom_steps_bytes
+        }
+
+==> database.py <==
+import sqlite3
+import os
+import json
+from datetime import datetime, date
+from typing import Dict, Any, List, Optional
+
+DB_FILE = os.path.join(os.path.dirname(__file__), "fit3_database.sqlite")
+
+def get_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+def init_db():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS steps (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        day_date TEXT UNIQUE,
+        steps INTEGER DEFAULT 0,
+        calories REAL DEFAULT 0.0,
+        distance_meters REAL DEFAULT 0.0,
+        active_minutes INTEGER DEFAULT 0,
+        timestamp TEXT,
+        source TEXT DEFAULT 'Galaxy Fit3 (78DC)'
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS heart_rate (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bpm INTEGER NOT NULL,
+        contact INTEGER DEFAULT 1,
+        rr_interval_ms INTEGER,
+        timestamp TEXT NOT NULL,
+        source TEXT DEFAULT 'Galaxy Fit3 (78DC)'
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS sleep_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        day_date TEXT UNIQUE,
+        start_time TEXT,
+        end_time TEXT,
+        deep_minutes INTEGER DEFAULT 0,
+        light_minutes INTEGER DEFAULT 0,
+        rem_minutes INTEGER DEFAULT 0,
+        awake_minutes INTEGER DEFAULT 0,
+        sleep_score INTEGER DEFAULT 80,
+        timestamp TEXT,
+        source TEXT DEFAULT 'Galaxy Fit3 (78DC)'
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS spo2 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        percentage INTEGER NOT NULL,
+        timestamp TEXT NOT NULL,
+        source TEXT DEFAULT 'Galaxy Fit3 (78DC)'
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS battery (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        level INTEGER NOT NULL,
+        timestamp TEXT NOT NULL
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS ble_packets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        service_uuid TEXT,
+        char_uuid TEXT,
+        direction TEXT DEFAULT 'RX',
+        hex_string TEXT,
+        raw_bytes_json TEXT,
+        decoded_summary TEXT,
+        note TEXT
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )
+    """)
+
+    conn.commit()
+    conn.close()
+
+# MARK: - Ingestion Functions
+
+def save_steps(steps: int, calories: Optional[float] = None, distance: Optional[float] = None, active_minutes: Optional[int] = None, source: str = "Galaxy Fit3 (78DC)"):
+    if calories is None:
+        calories = round(steps * 0.042, 1)
+    if distance is None:
+        distance = round(steps * 0.74, 1)
+    if active_minutes is None:
+        active_minutes = max(0, int(steps / 115))
+
+    today_str = date.today().isoformat()
+    now_str = datetime.now().isoformat()
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT INTO steps (day_date, steps, calories, distance_meters, active_minutes, timestamp, source)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(day_date) DO UPDATE SET
+        steps = excluded.steps,
+        calories = excluded.calories,
+        distance_meters = excluded.distance_meters,
+        active_minutes = excluded.active_minutes,
+        timestamp = excluded.timestamp,
+        source = excluded.source
+    """, (today_str, steps, calories, distance, active_minutes, now_str, source))
+    conn.commit()
+    conn.close()
+
+def save_heart_rate(bpm: int, contact: bool = True, rr_interval_ms: Optional[int] = None, source: str = "Galaxy Fit3 (78DC)"):
+    now_str = datetime.now().isoformat()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT INTO heart_rate (bpm, contact, rr_interval_ms, timestamp, source)
+    VALUES (?, ?, ?, ?, ?)
+    """, (bpm, 1 if contact else 0, rr_interval_ms, now_str, source))
+    conn.commit()
+    conn.close()
+
+def save_sleep_session(start_time: str, end_time: str, deep: int, light: int, rem: int, awake: int, score: int = 85, source: str = "Galaxy Fit3 (78DC)"):
+    today_str = date.today().isoformat()
+    now_str = datetime.now().isoformat()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT INTO sleep_sessions (day_date, start_time, end_time, deep_minutes, light_minutes, rem_minutes, awake_minutes, sleep_score, timestamp, source)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(day_date) DO UPDATE SET
+        start_time = excluded.start_time,
+        end_time = excluded.end_time,
+        deep_minutes = excluded.deep_minutes,
+        light_minutes = excluded.light_minutes,
+        rem_minutes = excluded.rem_minutes,
+        awake_minutes = excluded.awake_minutes,
+        sleep_score = excluded.sleep_score,
+        timestamp = excluded.timestamp,
+        source = excluded.source
+    """, (today_str, start_time, end_time, deep, light, rem, awake, score, now_str, source))
+    conn.commit()
+    conn.close()
+
+def save_spo2(percentage: int, source: str = "Galaxy Fit3 (78DC)"):
+    now_str = datetime.now().isoformat()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT INTO spo2 (percentage, timestamp, source)
+    VALUES (?, ?, ?)
+    """, (percentage, now_str, source))
+    conn.commit()
+    conn.close()
+
+def save_battery(level: int):
+    now_str = datetime.now().isoformat()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT INTO battery (level, timestamp)
+    VALUES (?, ?)
+    """, (level, now_str))
+    conn.commit()
+    conn.close()
+
+def save_ble_packet(service_uuid: str, char_uuid: str, direction: str, hex_string: str, raw_bytes: list, decoded_summary: str, note: Optional[str] = None):
+    now_str = datetime.now().isoformat()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT INTO ble_packets (timestamp, service_uuid, char_uuid, direction, hex_string, raw_bytes_json, decoded_summary, note)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (now_str, service_uuid, char_uuid, direction, hex_string, json.dumps(raw_bytes), decoded_summary, note))
+    conn.commit()
+def save_setting(key: str, value: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT INTO settings (key, value)
+    VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    """, (key, value))
+    conn.commit()
+    conn.close()
+
+def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+    row = cursor.fetchone()
+    conn.close()
+    if row and row["value"]:
+        return row["value"]
+    return default
+
+# MARK: - Query Functions
+
+def purge_demo_data():
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM steps WHERE source LIKE '%Demo%'")
+    cursor.execute("DELETE FROM heart_rate WHERE source LIKE '%Demo%'")
+    cursor.execute("DELETE FROM sleep_sessions WHERE source LIKE '%Demo%'")
+    cursor.execute("DELETE FROM spo2 WHERE source LIKE '%Demo%'")
+    cursor.execute("DELETE FROM battery WHERE id IN (SELECT id FROM battery ORDER BY id ASC LIMIT 2)") # limpia semilla inicial de batería si existía
+    cursor.execute("DELETE FROM ble_packets WHERE service_uuid LIKE '%Mock%' OR char_uuid LIKE '%Mock%'")
+    conn.commit()
+    conn.close()
+
+def get_today_summary() -> Dict[str, Any]:
+    today_str = date.today().isoformat()
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Steps
+    cursor.execute("SELECT * FROM steps WHERE day_date = ? AND source NOT LIKE '%Demo%'", (today_str,))
+    step_row = cursor.fetchone()
+    has_real_steps = step_row is not None
+    steps_data = dict(step_row) if step_row else {
+        "steps": 0,
+        "calories": 0.0,
+        "distance_meters": 0.0,
+        "active_minutes": 0
+    }
+
+    # Latest Heart Rate
+    cursor.execute("SELECT bpm, timestamp FROM heart_rate WHERE source NOT LIKE '%Demo%' ORDER BY id DESC LIMIT 1")
+    hr_row = cursor.fetchone()
+    has_real_hr = hr_row is not None
+    latest_hr = hr_row["bpm"] if hr_row else None
+    latest_hr_time = hr_row["timestamp"] if hr_row else None
+
+    # Avg Heart Rate Today
+    cursor.execute("SELECT AVG(bpm) as avg_bpm FROM heart_rate WHERE timestamp >= ? AND source NOT LIKE '%Demo%'", (today_str + "T00:00:00",))
+    avg_hr_row = cursor.fetchone()
+    avg_hr = int(round(avg_hr_row["avg_bpm"])) if (avg_hr_row and avg_hr_row["avg_bpm"]) else latest_hr
+
+    # Latest Battery
+    cursor.execute("SELECT level FROM battery ORDER BY id DESC LIMIT 1")
+    bat_row = cursor.fetchone()
+    has_real_battery = bat_row is not None
+    battery_level = bat_row["level"] if bat_row else None
+
+    # Latest SpO2
+    cursor.execute("SELECT percentage FROM spo2 WHERE source NOT LIKE '%Demo%' ORDER BY id DESC LIMIT 1")
+    spo2_row = cursor.fetchone()
+    has_real_spo2 = spo2_row is not None
+    latest_spo2 = spo2_row["percentage"] if spo2_row else None
+
+    # Sleep
+    cursor.execute("SELECT * FROM sleep_sessions WHERE day_date = ? AND source NOT LIKE '%Demo%'", (today_str,))
+    sleep_row = cursor.fetchone()
+    if not sleep_row:
+        # Check most recent sleep
+        cursor.execute("SELECT * FROM sleep_sessions WHERE source NOT LIKE '%Demo%' ORDER BY id DESC LIMIT 1")
+        sleep_row = cursor.fetchone()
+
+    has_real_sleep = sleep_row is not None
+    if sleep_row:
+        sleep_data = dict(sleep_row)
+        total_sleep_minutes = (sleep_data.get("deep_minutes", 0) +
+                              sleep_data.get("light_minutes", 0) +
+                              sleep_data.get("rem_minutes", 0))
+        sleep_dict = {
+            "total_minutes": total_sleep_minutes,
+            "deep_minutes": sleep_data.get("deep_minutes", 0),
+            "light_minutes": sleep_data.get("light_minutes", 0),
+            "rem_minutes": sleep_data.get("rem_minutes", 0),
+            "awake_minutes": sleep_data.get("awake_minutes", 0),
+            "sleep_score": sleep_data.get("sleep_score", 0),
+            "start_time": sleep_data.get("start_time"),
+            "end_time": sleep_data.get("end_time")
+        }
+    else:
+        sleep_dict = {
+            "total_minutes": 0,
+            "deep_minutes": 0,
+            "light_minutes": 0,
+            "rem_minutes": 0,
+            "awake_minutes": 0,
+            "sleep_score": 0,
+            "start_time": None,
+            "end_time": None
+        }
+
+    # Recent HR points for Chart.js
+    cursor.execute("SELECT bpm, timestamp FROM heart_rate WHERE source NOT LIKE '%Demo%' ORDER BY id DESC LIMIT 20")
+    hr_samples = [dict(r) for r in cursor.fetchall()]
+    hr_samples.reverse()
+
+    conn.close()
+
+    return {
+        "has_real_steps": has_real_steps,
+        "has_real_hr": has_real_hr,
+        "has_real_battery": has_real_battery,
+        "has_real_spo2": has_real_spo2,
+        "has_real_sleep": has_real_sleep,
+        "steps": steps_data.get("steps", 0),
+        "calories": steps_data.get("calories", 0.0),
+        "distance_meters": steps_data.get("distance_meters", 0.0),
+        "active_minutes": steps_data.get("active_minutes", 0),
+        "heart_rate_latest": latest_hr,
+        "heart_rate_avg": avg_hr,
+        "heart_rate_latest_time": latest_hr_time,
+        "battery": battery_level,
+        "spo2": latest_spo2,
+        "sleep": sleep_dict,
+        "hr_chart": hr_samples
+    }
+
+def get_apple_health_payload() -> Dict[str, Any]:
+    summary = get_today_summary()
+    return {
+        "status": "success",
+        "device_name": "Galaxy Fit3 (78DC)",
+        "model": "SM-R390",
+        "date": date.today().isoformat(),
+        "exported_at": datetime.now().isoformat(),
+        "summary": {
+            "steps": summary["steps"] if summary["has_real_steps"] else 0,
+            "active_calories_kcal": summary["calories"] if summary["has_real_steps"] else 0.0,
+            "distance_km": round((summary["distance_meters"] or 0) / 1000.0, 2) if summary["has_real_steps"] else 0.0,
+            "active_minutes": summary["active_minutes"] if summary["has_real_steps"] else 0,
+            "heart_rate_latest_bpm": summary["heart_rate_latest"],
+            "heart_rate_avg_bpm": summary["heart_rate_avg"],
+            "spo2_percent": summary["spo2"],
+            "sleep_duration_hours": round(summary["sleep"]["total_minutes"] / 60.0, 2) if summary["has_real_sleep"] else 0.0,
+            "sleep_score": summary["sleep"]["sleep_score"] if summary["has_real_sleep"] else 0,
+            "battery_percent": summary["battery"]
+        },
+        "shortcuts_keys": {
+            "steps": summary["steps"] if summary["has_real_steps"] else 0,
+            "heart_rate": summary["heart_rate_latest"],
+            "sleep_minutes": summary["sleep"]["total_minutes"] if summary["has_real_sleep"] else 0,
+            "spo2": summary["spo2"]
+        }
+    }
+
+def get_recent_packets(limit: int = 60) -> List[Dict[str, Any]]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM ble_packets ORDER BY id DESC LIMIT ?", (limit,))
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
+
+def seed_initial_demo_data():
+    """Solo para pruebas manuales si el usuario lo solicita explícitamente."""
+    pass
+
+def export_full_database_dict() -> Dict[str, Any]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM steps ORDER BY id DESC")
+    steps = [dict(r) for r in cursor.fetchall()]
+    cursor.execute("SELECT * FROM heart_rate ORDER BY id DESC LIMIT 500")
+    hr = [dict(r) for r in cursor.fetchall()]
+    cursor.execute("SELECT * FROM sleep_sessions ORDER BY id DESC")
+    sleep = [dict(r) for r in cursor.fetchall()]
+    cursor.execute("SELECT * FROM spo2 ORDER BY id DESC LIMIT 100")
+    spo2 = [dict(r) for r in cursor.fetchall()]
+    cursor.execute("SELECT * FROM battery ORDER BY id DESC LIMIT 100")
+    battery = [dict(r) for r in cursor.fetchall()]
+    cursor.execute("SELECT * FROM ble_packets ORDER BY id DESC LIMIT 200")
+    packets = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return {
+        "exported_at": datetime.now().isoformat(),
+        "device": "Galaxy Fit3 (78DC)",
+        "tables": {
+            "steps": steps,
+            "heart_rate": hr,
+            "sleep_sessions": sleep,
+            "spo2": spo2,
+            "battery": battery,
+            "ble_packets": packets
+        }
+    }
+
+def export_heart_rate_csv() -> str:
+    import io
+    import csv
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT timestamp, bpm, contact, rr_interval_ms, source FROM heart_rate ORDER BY id DESC LIMIT 1000")
+    rows = cursor.fetchall()
+    conn.close()
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["timestamp", "bpm", "contact", "rr_interval_ms", "source"])
+    for r in rows:
+        writer.writerow([r["timestamp"], r["bpm"], r["contact"], r["rr_interval_ms"], r["source"]])
+    return output.getvalue()
+
+
+==> main.py <==
+import os
+import socket
+import logging
+import asyncio
+from typing import Optional
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+import database
+from ble_manager import BLEManager, HAS_MACOS_COREBLUETOOTH
+
+logger = logging.getLogger("fit3.main")
+logging.basicConfig(level=logging.INFO)
+
+# Helper para detectar la IP LAN del Mac
+def get_local_ip() -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(('10.255.255.255', 1))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = '127.0.0.1'
+    finally:
+        s.close()
+    return ip
+
+ble_manager = BLEManager()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Inicialización en arranque (Sin sembrar datos demo falsos)
+    database.init_db()
+    database.purge_demo_data()
+    logger.info("=" * 60)
+    logger.info("🚀 Fit3 Mac Studio iniciado con éxito")
+    logger.info("💻 Visualización y recolección de datos en tu Mac:")
+    logger.info("   -> http://localhost:8000")
+    logger.info("=" * 60)
+    
+    # Recuperación automática de periféricos ya enlazados a macOS al iniciar
+    if HAS_MACOS_COREBLUETOOTH:
+        asyncio.create_task(ble_manager.retrieve_connected_peripherals())
+    yield
+    # Limpieza en apagado
+    if ble_manager.client and ble_manager.client.is_connected:
+        await ble_manager.disconnect()
+
+app = FastAPI(title="Fit3 Mac Studio - Recolección de Datos BLE", lifespan=lifespan)
+
+# Montar carpeta estática
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+os.makedirs(static_dir, exist_ok=True)
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+# MARK: - Pydantic Request Models
+
+class ConnectRequest(BaseModel):
+    address: str
+
+class CharActionRequest(BaseModel):
+    uuid: str
+
+class WriteCharRequest(BaseModel):
+    uuid: str
+    hex_payload: str
+
+class MapCharRequest(BaseModel):
+    target: str # steps, heart_rate, sleep
+    uuid: str
+    offset: Optional[int] = 0
+    byte_length: Optional[int] = 4 # 2 para uint16, 4 para uint32
+
+class MockToggleRequest(BaseModel):
+    enabled: bool
+
+# MARK: - HTTP Endpoints
+
+@app.get("/")
+async def serve_index():
+    index_path = os.path.join(static_dir, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    return {"message": "Fit3 Mac & iPhone Bridge API online. Coloca index.html en /static."}
+
+@app.get("/api/status")
+async def get_status():
+    status = ble_manager.get_status()
+    status["local_ip"] = get_local_ip()
+    status["server_port"] = 8000
+    status["iphone_url"] = f"http://{status['local_ip']}:8000"
+    return status
+
+@app.post("/api/scan")
+async def trigger_scan(timeout: float = 5.0):
+    devices = await ble_manager.scan_devices(timeout=timeout)
+    return {"status": "success", "count": len(devices), "devices": devices}
+
+@app.post("/api/retrieve-connected")
+async def retrieve_connected():
+    devices = await ble_manager.retrieve_connected_peripherals()
+    return {
+        "status": "success",
+        "count": len(devices),
+        "devices": ble_manager.get_scanned_devices_list(),
+        "message": f"Se recuperaron {len(devices)} dispositivos conectados en macOS."
+    }
+
+@app.get("/api/devices")
+async def list_devices():
+    return {"devices": ble_manager.get_scanned_devices_list()}
+
+@app.post("/api/connect")
+async def connect_device(req: ConnectRequest):
+    try:
+        ok = await ble_manager.connect(req.address)
+        if not ok:
+            raise HTTPException(status_code=400, detail=ble_manager.last_status_message)
+        return {"status": "connected", "address": req.address, "name": ble_manager.connected_device_name}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Excepción en /api/connect: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/disconnect")
+async def disconnect_device():
+    await ble_manager.disconnect()
+    return {"status": "disconnected"}
+
+@app.get("/api/services")
+async def get_services():
+    return {"services": ble_manager.discovered_services}
+
+@app.post("/api/characteristics/notify")
+async def toggle_notify(req: CharActionRequest):
+    if req.uuid in ble_manager.active_subscriptions:
+        ok = await ble_manager.stop_notify(req.uuid)
+        return {"status": "stopped", "uuid": req.uuid, "success": ok}
+    else:
+        ok = await ble_manager.start_notify(req.uuid)
+        return {"status": "started", "uuid": req.uuid, "success": ok}
+
+@app.post("/api/characteristics/notify-all")
+async def notify_all_chars():
+    count = await ble_manager.subscribe_all_notifiable()
+    return {"status": "success", "subscribed_count": count}
+
+@app.post("/api/characteristics/read")
+async def read_char(req: CharActionRequest):
+    hex_val = await ble_manager.read_characteristic(req.uuid)
+    if hex_val is None:
+        raise HTTPException(status_code=400, detail="No se pudo leer la característica o el reloj no está conectado.")
+    return {"status": "success", "uuid": req.uuid, "hex_value": hex_val}
+
+@app.post("/api/characteristics/write")
+async def write_char(req: WriteCharRequest):
+    ok = await ble_manager.write_characteristic(req.uuid, req.hex_payload)
+    if not ok:
+        raise HTTPException(status_code=400, detail=ble_manager.last_status_message)
+    return {"status": "success", "uuid": req.uuid, "hex_payload": req.hex_payload}
+
+@app.post("/api/characteristics/map")
+async def map_characteristic(req: MapCharRequest):
+    cleaned = req.uuid.upper().strip()
+    if req.target == "steps":
+        ble_manager.custom_steps_uuid = cleaned
+        ble_manager.custom_steps_offset = max(0, req.offset or 0)
+        ble_manager.custom_steps_bytes = 2 if req.byte_length == 2 else 4
+        database.save_setting("custom_steps_uuid", ble_manager.custom_steps_uuid)
+        database.save_setting("custom_steps_offset", str(ble_manager.custom_steps_offset))
+        database.save_setting("custom_steps_bytes", str(ble_manager.custom_steps_bytes))
+    elif req.target == "heart_rate":
+        ble_manager.custom_hr_uuid = cleaned
+        database.save_setting("custom_hr_uuid", ble_manager.custom_hr_uuid)
+    elif req.target == "sleep":
+        ble_manager.custom_sleep_uuid = cleaned
+        database.save_setting("custom_sleep_uuid", ble_manager.custom_sleep_uuid)
+    else:
+        raise HTTPException(status_code=400, detail=f"Objetivo de mapeo '{req.target}' no válido.")
+
+    await ble_manager.broadcast_event("status_update", ble_manager.get_status())
+    return {
+        "status": "success",
+        "target": req.target,
+        "uuid": cleaned,
+        "offset": getattr(ble_manager, "custom_steps_offset", 0),
+        "byte_length": getattr(ble_manager, "custom_steps_bytes", 4)
+    }
+
+@app.get("/api/mapping/steps")
+async def get_steps_mapping():
+    return {
+        "uuid": ble_manager.custom_steps_uuid,
+        "offset": ble_manager.custom_steps_offset,
+        "byte_length": ble_manager.custom_steps_bytes
+    }
+
+@app.post("/api/database/purge-demo")
+async def purge_demo_endpoint():
+    database.purge_demo_data()
+    ble_manager._load_initial_metrics()
+    await ble_manager.broadcast_event("telemetry_update", ble_manager.get_telemetry())
+    await ble_manager.broadcast_event("status_update", ble_manager.get_status())
+    return {"status": "success", "message": "Datos demo purgados de SQLite exitosamente."}
+
+@app.post("/api/mock/toggle")
+async def toggle_mock(req: MockToggleRequest):
+    await ble_manager.toggle_mock_mode(req.enabled)
+    return {"status": "success", "is_mock_mode": ble_manager.is_mock_mode}
+
+@app.get("/api/health/summary")
+async def get_health_summary():
+    return ble_manager.get_telemetry()
+
+@app.get("/api/apple-health-export")
+async def export_apple_health():
+    """Endpoint limpio optimizado para la app 'Atajos' de iOS."""
+    return database.get_apple_health_payload()
+
+@app.get("/api/ble-logs")
+async def get_ble_logs(limit: int = 80):
+    return {"logs": database.get_recent_packets(limit=limit)}
+
+@app.get("/api/export/csv")
+async def export_csv():
+    csv_data = database.export_heart_rate_csv()
+    return Response(
+        content=csv_data,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=fit3_heart_rate.csv"}
+    )
+
+@app.get("/api/export/json")
+async def export_json():
+    full_data = database.export_full_database_dict()
+    return JSONResponse(
+        content=full_data,
+        headers={"Content-Disposition": "attachment; filename=fit3_database_backup.json"}
+    )
+
+@app.get("/api/data/records")
+async def get_data_records():
+    return database.export_full_database_dict()
+
+# MARK: - WebSockets Real-Time Stream
+
+@app.websocket("/ws/ble-logs")
+async def websocket_logs_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    await ble_manager.register_websocket(websocket)
+
+    # Enviar estado inicial y últimos paquetes
+    try:
+        init_payload = {
+            "type": "init",
+            "status": ble_manager.get_status(),
+            "telemetry": ble_manager.get_telemetry(),
+            "services": ble_manager.discovered_services,
+            "recent_packets": database.get_recent_packets(limit=35)
+        }
+        await websocket.send_json(init_payload)
+
+        while True:
+            # Mantener conexión viva y procesar posibles comandos del frontend
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        await ble_manager.unregister_websocket(websocket)
+    except Exception as e:
+        logger.debug(f"WebSocket cerrado: {e}")
+        await ble_manager.unregister_websocket(websocket)
+
+==> static/index.html <==
+<!DOCTYPE html>
+<html lang="es" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Fit3 Mac Studio - Galaxy Fit 3 (SM-R390)</title>
+  
+  <!-- PWA Meta Tags para iPhone Safari -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Fit3 Bridge" />
+  <meta name="theme-color" content="#12100E" />
+
+  <!-- TailwindCSS & Chart.js & QRCode CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            appBg: '#12100E',
+            appCard: '#1E1A17',
+            appCardElevated: '#28221D',
+            appBorder: 'rgba(245, 232, 214, 0.08)',
+            appText: '#F7F2EB',
+            appMuted: '#A89F94',
+            fitAmber: '#E59A52',      // Ámbar dorado (Pasos / Acento)
+            fitSage: '#8AB082',       // Verde Salvia (Actividad)
+            fitCoral: '#D95F5B',      // Coral Arcilla (Pulsaciones)
+            fitTerracotta: '#D96B43', // Terracota Cobre (Calorías)
+            fitMauve: '#B88B9E',      // Malva Cálido (Sueño Ligero)
+            fitPlum: '#8C6278',       // Ciruela Cálido (Sueño Profundo)
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    body {
+      background-color: #12100E;
+      color: #F7F2EB;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .custom-scrollbar::-webkit-scrollbar {
+      width: 4px;
+      height: 4px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb {
+      background: rgba(245, 232, 214, 0.15);
+      border-radius: 999px;
+    }
+    @keyframes pulseSoft {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.05); opacity: 0.85; }
+    }
+    .pulse-watch {
+      animation: pulseSoft 2s infinite ease-in-out;
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col justify-between selection:bg-fitAmber selection:text-black">
+
+  <!-- Header Superior -->
+  <header class="sticky top-0 z-40 bg-appBg/90 backdrop-blur-md border-b border-appBorder px-4 py-3 sm:px-6">
+    <div class="max-w-6xl mx-auto flex items-center justify-between gap-4">
+      
+      <div class="flex items-center gap-3">
+        <div class="w-9 h-9 rounded-xl bg-fitAmber/20 border border-fitAmber/40 flex items-center justify-center text-fitAmber text-lg shadow-sm">
+          ⌚
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <h1 class="font-extrabold text-base sm:text-lg tracking-tight text-appText">Fit3 Mac Studio</h1>
+            <span id="connBadge" class="text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-appCardElevated text-appMuted border border-appBorder">
+              Desconectado
+            </span>
+          </div>
+          <p id="subStatusText" class="text-xs text-appMuted truncate max-w-[240px] sm:max-w-md">
+            Recolección y Visualización de Métricas BLE en macOS
+          </p>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <!-- Indicador de Batería -->
+        <div id="batteryPill" class="hidden sm:flex items-center gap-1.5 px-3 py-1 rounded-full bg-appCard border border-appBorder text-xs font-semibold">
+          <span class="text-fitAmber">🔋</span>
+          <span id="headerBatteryVal">--%</span>
+        </div>
+
+        <!-- Botón Modo Simulación -->
+        <button id="btnMockToggle" onclick="toggleMockMode()" class="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-fitAmber/30 bg-fitAmber/10 text-fitAmber hover:bg-fitAmber/20 text-xs font-bold transition-all">
+          <span class="w-2 h-2 rounded-full bg-fitAmber inline-block"></span>
+          <span id="mockBtnText">Simulación OFF</span>
+        </button>
+      </div>
+
+    </div>
+  </header>
+
+  <!-- Contenedor Principal con Tabs -->
+  <main class="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6 space-y-6">
+
+    <!-- Navegación de Pestañas estilo macOS -->
+    <nav class="flex p-1 bg-appCard border border-appBorder rounded-2xl max-w-lg mx-auto shadow-inner">
+      <button onclick="switchTab('dashboard')" id="tabNav-dashboard" class="flex-1 py-2 rounded-xl text-xs sm:text-sm font-bold text-black bg-fitAmber shadow-md transition-all">
+        💚 Métricas en Vivo
+      </button>
+      <button onclick="switchTab('sniffer')" id="tabNav-sniffer" class="flex-1 py-2 rounded-xl text-xs sm:text-sm font-bold text-appMuted hover:text-appText transition-all">
+        📟 Sniffer & Control BLE
+      </button>
+      <button onclick="switchTab('data')" id="tabNav-data" class="flex-1 py-2 rounded-xl text-xs sm:text-sm font-bold text-appMuted hover:text-appText transition-all">
+        💾 Datos en Mac (SQLite)
+      </button>
+    </nav>
+
+    <!-- ==================== PESTAÑA 1: DASHBOARD DE SALUD ==================== -->
+    <section id="tabContent-dashboard" class="space-y-6">
+
+      <!-- Fila 1: Banner de Conexión y Dispositivo -->
+      <div class="bg-appCard border border-appBorder rounded-3xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm">
+        <div class="flex items-center gap-4">
+          <div id="deviceAvatar" class="w-14 h-14 rounded-2xl bg-fitAmber/15 border border-fitAmber/30 flex items-center justify-center text-2xl text-fitAmber">
+            ⌚
+          </div>
+          <div>
+            <div class="flex items-center gap-2">
+              <h2 id="cardDeviceName" class="font-extrabold text-lg text-appText">Galaxy Fit3 (78DC)</h2>
+              <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-fitSage/20 text-fitSage border border-fitSage/30">SM-R390</span>
+            </div>
+            <p id="cardDeviceAddress" class="text-xs text-appMuted font-mono">Bluetooth Low Energy • CoreBluetooth</p>
+            <p id="cardDeviceStatusMsg" class="text-xs text-appMuted mt-0.5 font-medium">Esperando conexión Bluetooth con tu Galaxy Fit3</p>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-3 self-end sm:self-center">
+          <button onclick="switchTab('sniffer')" class="px-4 py-2 rounded-xl bg-appCardElevated border border-appBorder text-xs font-semibold text-appText hover:border-fitAmber/40 transition-all">
+            Inspeccionar UUIDs
+          </button>
+          <button id="btnQuickConnect" onclick="handleQuickConnect()" class="px-4 py-2 rounded-xl bg-fitAmber text-black text-xs font-bold hover:brightness-105 transition-all">
+            Conectar Reloj
+          </button>
+        </div>
+      </div>
+
+      <!-- Fila 2: Anillos de Actividad Diaria & Tarjetas -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+        <!-- Tarjeta de Anillos Concéntricos (Samsung Health / Apple Fitness) -->
+        <div class="lg:col-span-1 bg-appCard border border-appBorder rounded-3xl p-6 flex flex-col justify-between shadow-sm">
+          <div class="flex items-center justify-between">
+            <span class="font-bold text-sm text-appText flex items-center gap-2">
+              <span class="text-fitTerracotta">🔥</span> Actividad Diaria
+            </span>
+            <span id="distanceKmBadge" class="text-xs font-bold text-appMuted">-- km</span>
+          </div>
+
+          <div class="flex items-center justify-center my-4 relative">
+            <svg class="w-44 h-44 -rotate-90" viewBox="0 0 140 140">
+              <!-- Anillo 1: Pasos (r=56, C=351.86) -->
+              <circle cx="70" cy="70" r="56" stroke="rgba(229,154,82,0.15)" stroke-width="12" fill="none" />
+              <circle id="ringStepsSvg" cx="70" cy="70" r="56" stroke="#E59A52" stroke-width="12" fill="none"
+                      stroke-linecap="round" stroke-dasharray="351.86" stroke-dashoffset="351.86" class="transition-all duration-700" />
+
+              <!-- Anillo 2: Calorías (r=41, C=257.61) -->
+              <circle cx="70" cy="70" r="41" stroke="rgba(217,107,67,0.15)" stroke-width="12" fill="none" />
+              <circle id="ringCaloriesSvg" cx="70" cy="70" r="41" stroke="#D96B43" stroke-width="12" fill="none"
+                      stroke-linecap="round" stroke-dasharray="257.61" stroke-dashoffset="257.61" class="transition-all duration-700" />
+
+              <!-- Anillo 3: Tiempo Activo (r=26, C=163.36) -->
+              <circle cx="70" cy="70" r="26" stroke="rgba(138,176,130,0.15)" stroke-width="12" fill="none" />
+              <circle id="ringActiveSvg" cx="70" cy="70" r="26" stroke="#8AB082" stroke-width="12" fill="none"
+                      stroke-linecap="round" stroke-dasharray="163.36" stroke-dashoffset="163.36" class="transition-all duration-700" />
+            </svg>
+            <div class="absolute text-2xl">🚶</div>
+          </div>
+
+          <div class="space-y-3 pt-2 border-t border-appBorder">
+            <div class="flex justify-between items-center text-xs">
+              <span class="flex items-center gap-1.5 text-appMuted">
+                <span class="w-2.5 h-2.5 rounded-full bg-fitAmber inline-block"></span> Pasos
+              </span>
+              <div class="text-right">
+                <span class="font-extrabold text-sm"><span id="valSteps" class="text-appText">--</span> <span class="text-appMuted text-[10px]">/ 10,000</span></span>
+                <span id="stepsStatusBadge" class="text-[10px] text-appMuted block">Esperando paquete BLE real</span>
+              </div>
+            </div>
+            <div class="flex justify-between items-center text-xs">
+              <span class="flex items-center gap-1.5 text-appMuted">
+                <span class="w-2.5 h-2.5 rounded-full bg-fitTerracotta inline-block"></span> Calorías activas
+              </span>
+              <span class="font-extrabold text-sm"><span id="valCalories" class="text-appText">--</span> <span class="text-appMuted text-[10px]">/ 400 kcal</span></span>
+            </div>
+            <div class="flex justify-between items-center text-xs">
+              <span class="flex items-center gap-1.5 text-appMuted">
+                <span class="w-2.5 h-2.5 rounded-full bg-fitSage inline-block"></span> Tiempo activo
+              </span>
+              <span class="font-extrabold text-sm"><span id="valActiveMins" class="text-appText">--</span> <span class="text-appMuted text-[10px]">/ 60 min</span></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Frecuencia Cardíaca con Chart.js en Vivo -->
+        <div class="lg:col-span-2 bg-appCard border border-appBorder rounded-3xl p-6 flex flex-col justify-between shadow-sm">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <span class="text-fitCoral">❤️</span>
+              <h3 class="font-bold text-sm text-appText">Frecuencia Cardíaca en Tiempo Real</h3>
+            </div>
+            <div class="flex items-baseline gap-1">
+              <span id="valHeartRateBpm" class="text-3xl font-black text-fitCoral">--</span>
+              <span class="text-xs font-bold text-appMuted">BPM</span>
+            </div>
+          </div>
+
+          <!-- Contenedor del Canvas de Chart.js -->
+          <div class="relative h-44 w-full my-2">
+            <canvas id="hrChartCanvas"></canvas>
+          </div>
+
+          <div class="flex items-center justify-between text-xs text-appMuted pt-2 border-t border-appBorder">
+            <span id="valHeartRateAvg">Esperando paquete BLE real...</span>
+            <span class="font-mono text-[10px] text-appMuted">Servicio GATT 0x180D (0x2A37)</span>
+            <span id="sensorActiveBadge" class="text-appMuted font-semibold">Sensor Standby</span>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Fila 3: Fases de Sueño & SpO2 -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+
+        <!-- SpO2 & Batería -->
+        <div class="md:col-span-1 space-y-6">
+          <div class="bg-appCard border border-appBorder rounded-3xl p-5 shadow-sm">
+            <div class="flex items-center justify-between">
+              <span class="text-xs text-appMuted font-bold uppercase tracking-wider flex items-center gap-1.5">
+                <span>🫁</span> Oxígeno (SpO2)
+              </span>
+              <span id="spo2StatusBadge" class="text-[10px] font-bold text-appMuted bg-appCardElevated px-2 py-0.5 rounded-full">Sin lectura</span>
+            </div>
+            <div class="mt-3 flex items-baseline gap-2">
+              <span id="valSpO2" class="text-3xl font-black text-fitSage">--</span>
+              <span class="text-sm font-bold text-appMuted">%</span>
+            </div>
+            <p class="text-xs text-appMuted mt-1">Saturación de oxígeno en sangre</p>
+          </div>
+
+          <div class="bg-appCard border border-appBorder rounded-3xl p-5 shadow-sm">
+            <div class="flex items-center justify-between">
+              <span class="text-xs text-appMuted font-bold uppercase tracking-wider flex items-center gap-1.5">
+                <span>🔋</span> Batería del Reloj
+              </span>
+              <span id="valBatteryLevel" class="text-xl font-bold text-fitAmber">--%</span>
+            </div>
+            <div class="w-full bg-appCardElevated h-2.5 rounded-full overflow-hidden mt-3">
+              <div id="barBattery" class="bg-fitAmber h-full rounded-full transition-all duration-500" style="width: 0%;"></div>
+            </div>
+            <p class="text-xs text-appMuted mt-2">Lectura directa GATT 0x180F (0x2A19)</p>
+          </div>
+        </div>
+
+        <!-- Fases de Sueño -->
+        <div class="md:col-span-2 bg-appCard border border-appBorder rounded-3xl p-6 flex flex-col justify-between shadow-sm">
+          <div class="flex items-center justify-between">
+            <span class="font-bold text-sm text-appText flex items-center gap-2">
+              <span class="text-fitMauve">🌙</span> Registro de Sueño
+            </span>
+            <span id="valSleepScore" class="text-xs font-bold px-3 py-1 rounded-full bg-appCardElevated text-appMuted border border-appBorder">
+              Sin registro hoy
+            </span>
+          </div>
+
+          <div class="my-4">
+            <div class="flex items-baseline gap-2 mb-2">
+              <span id="valSleepTotalTime" class="text-2xl font-black text-appText">--</span>
+              <span class="text-xs text-appMuted">tiempo total dormido</span>
+            </div>
+
+            <!-- Barra Segmentada de Fases -->
+            <div class="w-full h-4 rounded-lg overflow-hidden flex gap-0.5 bg-appCardElevated">
+              <div id="barSleepDeep" class="bg-fitPlum h-full transition-all duration-500" style="width: 0%;" title="Profundo"></div>
+              <div id="barSleepLight" class="bg-fitMauve h-full transition-all duration-500" style="width: 0%;" title="Ligero"></div>
+              <div id="barSleepRem" class="bg-fitSage h-full transition-all duration-500" style="width: 0%;" title="REM"></div>
+              <div id="barSleepAwake" class="bg-fitCoral h-full transition-all duration-500" style="width: 0%;" title="Despierto"></div>
+            </div>
+          </div>
+
+          <!-- Leyenda de Fases -->
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-3 border-t border-appBorder text-xs">
+            <div class="bg-appCardElevated p-2.5 rounded-xl border border-appBorder">
+              <div class="text-appMuted flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-fitPlum"></span> Profundo</div>
+              <div id="txtSleepDeep" class="font-bold text-appText mt-1">--</div>
+            </div>
+            <div class="bg-appCardElevated p-2.5 rounded-xl border border-appBorder">
+              <div class="text-appMuted flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-fitMauve"></span> Ligero</div>
+              <div id="txtSleepLight" class="font-bold text-appText mt-1">--</div>
+            </div>
+            <div class="bg-appCardElevated p-2.5 rounded-xl border border-appBorder">
+              <div class="text-appMuted flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-fitSage"></span> REM</div>
+              <div id="txtSleepRem" class="font-bold text-appText mt-1">--</div>
+            </div>
+            <div class="bg-appCardElevated p-2.5 rounded-xl border border-appBorder">
+              <div class="text-appMuted flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-fitCoral"></span> Despierto</div>
+              <div id="txtSleepAwake" class="font-bold text-appText mt-1">--</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+    </section>
+
+    <!-- ==================== PESTAÑA 2: ESCÁNER Y DIAGNÓSTICO BLE ==================== -->
+    <section id="tabContent-sniffer" class="space-y-6 hidden">
+
+      <!-- Controles de Escaneo y Conexión -->
+      <div class="bg-appCard border border-appBorder rounded-3xl p-5 shadow-sm space-y-4">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h3 class="font-bold text-base text-appText flex items-center gap-2">
+              <span>📡</span> Escáner Bluetooth Low Energy
+            </h3>
+            <p class="text-xs text-appMuted">Detecta automáticamente periféricos BLE y destaca tu Samsung Galaxy Fit 3 (78DC)</p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <button id="btnRetrieveConnected" onclick="triggerRetrieveConnected()" class="px-4 py-2 rounded-xl bg-fitSage/20 text-fitSage border border-fitSage/40 text-xs font-bold hover:bg-fitSage/30 transition-all flex items-center gap-1.5" title="Busca el reloj directamente en CoreBluetooth si ya está enlazado en macOS">
+              <span>🔗</span> Recuperar Reloj Enlazado al Mac
+            </button>
+            <button id="btnScanBle" onclick="triggerScan()" class="px-4 py-2 rounded-xl bg-fitAmber text-black text-xs font-bold hover:brightness-105 transition-all flex items-center gap-1.5">
+              <span>🔍</span> Escanear Anuncios
+            </button>
+            <button onclick="subscribeAllNotifiable()" class="px-4 py-2 rounded-xl bg-appCardElevated border border-appBorder text-xs font-semibold text-appText hover:border-fitAmber/40 transition-all">
+              ⚡ Suscribir a Todos
+            </button>
+          </div>
+        </div>
+
+        <!-- Lista de Dispositivos Escaneados -->
+        <div id="devicesContainer" class="space-y-2 max-h-56 overflow-y-auto custom-scrollbar pt-2">
+          <div class="p-4 text-center text-xs text-appMuted bg-appCardElevated rounded-2xl border border-appBorder">
+            Haz clic en <strong>"Recuperar Reloj Enlazado al Mac"</strong> (si ya lo vinculaste en Ajustes de macOS) o en <strong>"Escanear Anuncios"</strong> para buscar el Galaxy Fit3.
+          </div>
+        </div>
+      </div>
+
+      <!-- Árbol de Servicios y Características GATT -->
+      <div class="bg-appCard border border-appBorder rounded-3xl p-5 shadow-sm space-y-4">
+        <div class="flex items-center justify-between">
+          <h3 class="font-bold text-base text-appText flex items-center gap-2">
+            <span>🧬</span> Servicios y Características GATT Enumerados
+          </h3>
+          <span id="serviceCountBadge" class="text-xs font-bold text-fitAmber bg-fitAmber/15 px-2.5 py-0.5 rounded-full">
+            0 servicios
+          </span>
+        </div>
+
+        <div id="servicesTreeContainer" class="space-y-3 max-h-64 overflow-y-auto custom-scrollbar">
+          <div class="p-6 text-center text-xs text-appMuted bg-appCardElevated rounded-2xl border border-appBorder">
+            Conecta el reloj o activa el Modo Simulación para explorar sus UUIDs propietarios y servicios estándar.
+          </div>
+        </div>
+      <!-- Panel de Ingeniería Inversa y Mapeo de Pasos Samsung -->
+      <div class="bg-appCard border border-appBorder rounded-3xl p-5 shadow-sm space-y-4">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h3 class="font-bold text-base text-appText flex items-center gap-2">
+              <span class="text-fitAmber">🎯</span> Decodificador y Mapeo de Pasos Samsung
+            </h3>
+            <p class="text-xs text-appMuted">
+              Fit 3 no usa el estándar GATT 0x1814. Al mover el reloj o caminar, las tramas muestran enteros Little-Endian crecientes (+DELTA). Configura o haz clic en "🎯 Mapear a Pasos" en la consola inferior para inyectarlos en el Dashboard.
+            </p>
+          </div>
+          <div class="flex items-center gap-2">
+            <span id="currentMappingBadge" class="text-xs font-mono font-bold px-3 py-1 rounded-full bg-fitAmber/15 text-fitAmber border border-fitAmber/30">
+              UUID: FEA1 • Off: 0 • u32LE
+            </span>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end pt-2 border-t border-appBorder">
+          <div class="sm:col-span-1">
+            <label class="block text-[10px] text-appMuted font-bold uppercase mb-1">UUID Característica</label>
+            <input id="mapStepsUuidInput" type="text" value="FEA1" placeholder="ej. FEA1 o UUID" class="w-full bg-appCardElevated border border-appBorder rounded-xl px-3 py-2 text-xs font-mono text-appText focus:outline-none focus:border-fitAmber" />
+          </div>
+          <div class="sm:col-span-1">
+            <label class="block text-[10px] text-appMuted font-bold uppercase mb-1">Offset (Byte inicio)</label>
+            <input id="mapStepsOffsetInput" type="number" min="0" max="20" value="0" class="w-full bg-appCardElevated border border-appBorder rounded-xl px-3 py-2 text-xs font-mono text-appText focus:outline-none focus:border-fitAmber" />
+          </div>
+          <div class="sm:col-span-1">
+            <label class="block text-[10px] text-appMuted font-bold uppercase mb-1">Formato Bytes</label>
+            <select id="mapStepsBytesSelect" class="w-full bg-appCardElevated border border-appBorder rounded-xl px-3 py-2 text-xs font-mono text-appText focus:outline-none focus:border-fitAmber">
+              <option value="4" selected>uint32LE (4 bytes)</option>
+              <option value="2">uint16LE (2 bytes)</option>
+            </select>
+          </div>
+          <div class="sm:col-span-1">
+            <button onclick="saveCustomStepsMapping()" class="w-full py-2 bg-fitAmber text-black font-bold rounded-xl text-xs hover:brightness-105 transition-all">
+              💾 Guardar Mapeo
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Consola Hexadecimal Sniffer en Vivo -->
+      <div class="bg-appCard border border-appBorder rounded-3xl p-5 shadow-sm space-y-4">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h3 class="font-bold text-base text-appText flex items-center gap-2">
+              <span>📟</span> Consola de Paquetes en Vivo (WebSockets)
+            </h3>
+            <p class="text-xs text-appMuted">Inspecciona bytes crudos, decodificación Little-Endian y texto UTF-8</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button id="btnPauseSniffer" onclick="togglePauseSniffer()" class="px-3 py-1.5 rounded-xl bg-appCardElevated border border-appBorder text-xs font-semibold text-appText hover:border-fitAmber/40">
+              ⏸ Pausar
+            </button>
+            <button onclick="clearPacketLogs()" class="px-3 py-1.5 rounded-xl bg-appCardElevated border border-appBorder text-xs font-semibold text-fitCoral hover:bg-fitCoral/10">
+              🗑️ Limpiar
+            </button>
+          </div>
+        </div>
+
+        <!-- Filtro rápido de paquetes -->
+        <div class="flex gap-2 overflow-x-auto pb-1 text-xs">
+          <button onclick="setFilter('ALL', this)" class="filter-chip px-3 py-1 rounded-full bg-fitAmber text-black font-bold whitespace-nowrap">Todos</button>
+          <button onclick="setFilter('2A37', this)" class="filter-chip px-3 py-1 rounded-full bg-appCardElevated text-appMuted hover:text-appText whitespace-nowrap">Heart Rate (2A37)</button>
+          <button onclick="setFilter('FEA1', this)" class="filter-chip px-3 py-1 rounded-full bg-appCardElevated text-appMuted hover:text-appText whitespace-nowrap">Pasos (FEA1)</button>
+          <button onclick="setFilter('FEA2', this)" class="filter-chip px-3 py-1 rounded-full bg-appCardElevated text-appMuted hover:text-appText whitespace-nowrap">Sueño (FEA2)</button>
+          <button onclick="setFilter('TX', this)" class="filter-chip px-3 py-1 rounded-full bg-appCardElevated text-appMuted hover:text-appText whitespace-nowrap">Comandos TX</button>
+        </div>
+
+        <!-- Contenedor del stream de paquetes -->
+        <div id="packetLogsStream" class="space-y-2 max-h-96 overflow-y-auto custom-scrollbar font-mono text-xs">
+          <!-- Inyectado dinámicamente -->
+        </div>
+
+        <!-- Inyector de Comandos Hexadecimales (TX) -->
+        <div class="pt-4 border-t border-appBorder grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
+          <div class="sm:col-span-1">
+            <label class="block text-[10px] text-appMuted font-bold uppercase mb-1">UUID Característica</label>
+            <input id="txCharUuidInput" type="text" value="FEA1" class="w-full bg-appCardElevated border border-appBorder rounded-xl px-3 py-2 text-xs font-mono text-appText focus:outline-none focus:border-fitAmber" />
+          </div>
+          <div class="sm:col-span-2">
+            <label class="block text-[10px] text-appMuted font-bold uppercase mb-1">Payload Hex (ej. FE A1 01 00)</label>
+            <input id="txHexPayloadInput" type="text" value="FE A1 01 00" class="w-full bg-appCardElevated border border-appBorder rounded-xl px-3 py-2 text-xs font-mono text-appText focus:outline-none focus:border-fitAmber" />
+          </div>
+          <div class="sm:col-span-1">
+            <button onclick="sendCustomHex()" class="w-full py-2 bg-fitAmber text-black font-bold rounded-xl text-xs hover:brightness-105 transition-all">
+              ⚡ Enviar (TX)
+            </button>
+          </div>
+        </div>
+
+      </div>
+
+    </section>
+
+    <!-- ==================== PESTAÑA 3: BASE DE DATOS Y EXPORTACIÓN LOCAL (macOS) ==================== -->
+    <section id="tabContent-data" class="space-y-6 hidden">
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+
+        <!-- Tarjeta de Exportación Directa -->
+        <div class="md:col-span-1 bg-appCard border border-appBorder rounded-3xl p-6 flex flex-col justify-between shadow-sm space-y-4">
+          <div>
+            <div class="flex items-center gap-2 mb-2">
+              <span class="text-2xl">💾</span>
+              <h3 class="font-bold text-base text-appText">Exportar Datos del Mac</h3>
+            </div>
+            <p class="text-xs text-appMuted leading-relaxed">
+              Todos los datos recibidos por Bluetooth del reloj se almacenan de forma local en <code class="text-fitAmber font-mono">fit3_database.sqlite</code>. Puedes descargarlos directamente para análisis o respaldo.
+            </p>
+          </div>
+
+          <!-- Contadores de Registros en SQLite -->
+          <div class="grid grid-cols-2 gap-2 text-xs">
+            <div class="bg-appCardElevated p-3 rounded-2xl border border-appBorder text-center">
+              <span class="text-appMuted text-[10px] block uppercase font-bold">Muestras Pulso</span>
+              <span id="dataCountHr" class="text-fitCoral font-extrabold text-lg">--</span>
+            </div>
+            <div class="bg-appCardElevated p-3 rounded-2xl border border-appBorder text-center">
+              <span class="text-appMuted text-[10px] block uppercase font-bold">Tramas Sniffer</span>
+              <span id="dataCountPackets" class="text-fitAmber font-extrabold text-lg">--</span>
+            </div>
+          </div>
+
+          <div class="space-y-2 pt-2">
+            <a href="/api/export/csv" download="fit3_heart_rate.csv" class="w-full py-2.5 bg-fitAmber text-black rounded-xl text-xs font-bold flex items-center justify-center gap-2 hover:brightness-105 transition-all shadow-sm">
+              <span>📊</span> Descargar Pulso (CSV)
+            </a>
+            <a href="/api/export/json" download="fit3_database_backup.json" class="w-full py-2.5 bg-appCardElevated border border-appBorder text-appText hover:border-fitAmber/40 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all">
+              <span>📦</span> Descargar Base Completa (JSON)
+            </a>
+            <button onclick="fetchDataRecords()" class="w-full py-2 text-xs text-appMuted hover:text-appText transition-all">
+              🔄 Actualizar Estadísticas
+            </button>
+            <button onclick="purgeDemoDataFromDb()" class="w-full py-2 bg-fitCoral/15 text-fitCoral hover:bg-fitCoral/25 border border-fitCoral/30 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5">
+              <span>🧹</span> Purgar Datos Demo de SQLite
+            </button>
+          </div>
+        </div>
+
+        <!-- Tabla de Registros Almacenados en SQLite -->
+        <div class="md:col-span-2 bg-appCard border border-appBorder rounded-3xl p-6 shadow-sm space-y-4">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <span class="text-fitSage">🗄️</span>
+              <h3 class="font-bold text-base text-appText">Registros Recientes en SQLite (macOS)</h3>
+            </div>
+            <span class="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-fitSage/20 text-fitSage border border-fitSage/30">
+              Almacenamiento Local WAL
+            </span>
+          </div>
+
+          <p class="text-xs text-appMuted">
+            Historial de muestras registradas directamente por el servicio de fondo de CoreBluetooth en tu Mac.
+          </p>
+
+          <div class="overflow-x-auto max-h-72 custom-scrollbar">
+            <table class="w-full text-left text-xs">
+              <thead class="text-[10px] uppercase text-appMuted border-b border-appBorder sticky top-0 bg-appCard">
+                <tr>
+                  <th class="py-2 px-2">Hora</th>
+                  <th class="py-2 px-2">Tipo</th>
+                  <th class="py-2 px-2">Valor</th>
+                  <th class="py-2 px-2">Origen</th>
+                </tr>
+              </thead>
+              <tbody id="dataTableBody" class="divide-y divide-appBorder font-mono text-[11px]">
+                <tr>
+                  <td colspan="4" class="py-4 text-center text-appMuted">Cargando registros...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+        </div>
+
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- Footer -->
+  <footer class="border-t border-appBorder bg-appBg/80 px-4 py-3 text-center text-xs text-appMuted">
+    Fit3 Mac Studio • Samsung Galaxy Fit 3 (SM-R390) • macOS Monterey Local SQLite
+  </footer>
+
+  <!-- Toast Notifier -->
+  <div id="toastNotification" class="fixed bottom-6 right-6 z-50 transform translate-y-24 opacity-0 transition-all duration-300 bg-appCardElevated border border-fitAmber/40 text-appText px-4 py-3 rounded-2xl shadow-xl flex items-center gap-3 text-xs font-semibold">
+    <span id="toastIcon">ℹ️</span>
+    <span id="toastMsg">Notificación</span>
+  </div>
+
+  <!-- Script Principal de la Aplicación -->
+  <script>
+    // MARK: - Estado Global
+    const state = {
+      activeTab: 'dashboard',
+      isMockMode: false,
+      isSnifferPaused: false,
+      packetFilter: 'ALL',
+      localIp: 'localhost',
+      serverPort: 8000,
+      packets: [],
+      hrHistory: []
+    };
+
+    let hrChart = null;
+    let ws = null;
+
+    // MARK: - Inicialización al cargar la página
+    document.addEventListener("DOMContentLoaded", () => {
+      initHeartRateChart();
+      initWebSocket();
+      fetchStatus();
+      fetchTelemetry();
+      fetchDevices();
+      fetchServices();
+      fetchDataRecords();
+      fetchStepsMapping();
+    });
+
+    // MARK: - Control de Pestañas
+    function switchTab(tabId) {
+      state.activeTab = tabId;
+      const tabs = ['dashboard', 'sniffer', 'data'];
+
+      tabs.forEach(t => {
+        const navBtn = document.getElementById(`tabNav-${t}`);
+        const content = document.getElementById(`tabContent-${t}`);
+        if (!navBtn || !content) return;
+        if (t === tabId) {
+          content.classList.remove('hidden');
+          navBtn.classList.remove('text-appMuted', 'hover:text-appText');
+          navBtn.classList.add('bg-fitAmber', 'text-black', 'shadow-md');
+        } else {
+          content.classList.add('hidden');
+          navBtn.classList.remove('bg-fitAmber', 'text-black', 'shadow-md');
+          navBtn.classList.add('text-appMuted', 'hover:text-appText');
+        }
+      });
+
+      if (tabId === 'dashboard' && hrChart) {
+        setTimeout(() => hrChart.resize(), 50);
+      }
+      if (tabId === 'data') {
+        fetchDataRecords();
+      }
+    }
+
+    // MARK: - Gráfica Chart.js de Frecuencia Cardíaca
+    function initHeartRateChart() {
+      const ctx = document.getElementById('hrChartCanvas').getContext('2d');
+      const gradient = ctx.createLinearGradient(0, 0, 0, 180);
+      gradient.addColorStop(0, 'rgba(217, 95, 91, 0.40)');
+      gradient.addColorStop(1, 'rgba(217, 95, 91, 0.01)');
+
+      hrChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: [],
+          datasets: [{
+            data: [],
+            borderColor: '#D95F5B',
+            backgroundColor: gradient,
+            borderWidth: 2.5,
+            fill: true,
+            tension: 0.35,
+            pointRadius: 3.5,
+            pointBackgroundColor: '#D95F5B',
+            pointBorderColor: '#1E1A17',
+            pointBorderWidth: 1.5
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: '#28221D',
+              titleColor: '#A89F94',
+              bodyColor: '#F7F2EB',
+              borderColor: 'rgba(245, 232, 214, 0.1)',
+              borderWidth: 1,
+              callbacks: {
+                label: (ctx) => `${ctx.raw} BPM`
+              }
+            }
+          },
+          scales: {
+            x: {
+              grid: { display: false },
+              ticks: { color: '#A89F94', font: { size: 10 } }
+            },
+            y: {
+              min: 50,
+              max: 130,
+              grid: { color: 'rgba(245, 232, 214, 0.05)' },
+              ticks: { color: '#A89F94', font: { size: 10 }, stepSize: 20 }
+            }
+          }
+        }
+      });
+    }
+
+    function updateChartData(samples) {
+      if (!hrChart || !samples) return;
+      const labels = samples.map(s => {
+        const t = s.timestamp || "";
+        return t.length >= 19 ? t.substring(11, 16) : "";
+      });
+      const data = samples.map(s => s.bpm);
+
+      hrChart.data.labels = labels;
+      hrChart.data.datasets[0].data = data;
+      hrChart.update();
+    }
+
+    // MARK: - WebSockets para Telemetría y Paquetes Hex en Vivo
+    function initWebSocket() {
+      const loc = window.location;
+      const wsProtocol = loc.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${wsProtocol}//${loc.host}/ws/ble-logs`;
+
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        console.log("WebSocket BLE conectado.");
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'init') {
+            updateStatusUI(msg.status);
+            updateTelemetryUI(msg.telemetry);
+            renderServicesTree(msg.services);
+            if (msg.recent_packets) {
+              msg.recent_packets.forEach(p => appendPacketToConsole(p, false));
+            }
+          } else if (msg.type === 'telemetry_update') {
+            updateTelemetryUI(msg.data);
+          } else if (msg.type === 'status_update') {
+            updateStatusUI(msg.data);
+          } else if (msg.type === 'ble_packet') {
+            appendPacketToConsole(msg.data, true);
+          } else if (msg.type === 'services_discovered') {
+            renderServicesTree(msg.data);
+          }
+        } catch (e) {
+          console.error("Error al procesar mensaje WebSocket:", e);
+        }
+      };
+
+      ws.onclose = () => {
+        console.warn("WebSocket cerrado. Reintentando en 3s...");
+        setTimeout(initWebSocket, 3000);
+      };
+    }
+
+    // MARK: - Actualizaciones de UI
+    function updateStatusUI(status) {
+      if (!status) return;
+      state.isMockMode = status.is_mock_mode;
+
+      const badge = document.getElementById('connBadge');
+      const sub = document.getElementById('subStatusText');
+      const cardName = document.getElementById('cardDeviceName');
+      const cardMsg = document.getElementById('cardDeviceStatusMsg');
+      const btnMock = document.getElementById('mockBtnText');
+      const quickBtn = document.getElementById('btnQuickConnect');
+      const avatar = document.getElementById('deviceAvatar');
+
+      sub.textContent = status.last_status_message;
+      cardMsg.textContent = status.last_status_message;
+
+      if (status.connection_state === 'connected') {
+        badge.textContent = "Conectado";
+        badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-fitSage/20 text-fitSage border border-fitSage/30";
+        cardName.textContent = status.connected_device_name;
+        quickBtn.textContent = "Desconectar";
+        quickBtn.className = "px-4 py-2 rounded-xl bg-fitCoral text-white text-xs font-bold hover:brightness-105 transition-all";
+        avatar.classList.add('pulse-watch');
+      } else if (status.connection_state === 'simulating') {
+        badge.textContent = "Simulación";
+        badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-fitAmber/20 text-fitAmber border border-fitAmber/30";
+        cardName.textContent = "Galaxy Fit3 (78DC) [Sim]";
+        quickBtn.textContent = "Detener Sim";
+        quickBtn.className = "px-4 py-2 rounded-xl bg-appCardElevated text-appText border border-appBorder text-xs font-bold";
+        avatar.classList.remove('pulse-watch');
+      } else if (status.connection_state === 'connecting' || status.connection_state === 'scanning') {
+        badge.textContent = status.connection_state === 'scanning' ? "Buscando..." : "Conectando...";
+        badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-fitTerracotta/20 text-fitTerracotta border border-fitTerracotta/30";
+      } else {
+        badge.textContent = "Desconectado";
+        badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-appCardElevated text-appMuted border border-appBorder";
+        quickBtn.textContent = "Conectar Reloj";
+        quickBtn.className = "px-4 py-2 rounded-xl bg-fitAmber text-black text-xs font-bold hover:brightness-105 transition-all";
+        avatar.classList.remove('pulse-watch');
+      }
+
+      btnMock.textContent = state.isMockMode ? "Simulación ON" : "Simulación OFF";
+
+      // Actualizar IP local y QR si vino en el payload
+      if (status.local_ip) {
+        state.localIp = status.local_ip;
+        const url = `http://${status.local_ip}:${status.server_port || 8000}`;
+        document.getElementById('localIpUrlText').textContent = url;
+        document.getElementById('shortcutEndpointCode').textContent = `${url}/api/apple-health-export`;
+        renderQRCode(url);
+      }
+    }
+
+    function updateTelemetryUI(t) {
+      if (!t) return;
+
+      // 1. Pasos y Actividad Diaria
+      const hasSteps = t.has_real_steps && t.steps !== null && t.steps !== undefined;
+      const elSteps = document.getElementById('valSteps');
+      const elCal = document.getElementById('valCalories');
+      const elAct = document.getElementById('valActiveMins');
+      const elDist = document.getElementById('distanceKmBadge');
+      const elStepsStatus = document.getElementById('stepsStatusBadge');
+
+      if (hasSteps) {
+        elSteps.textContent = Number(t.steps).toLocaleString();
+        elCal.textContent = Math.round(t.calories || 0);
+        elAct.textContent = t.active_minutes || 0;
+        elDist.textContent = `${((t.distance_meters || 0) / 1000).toFixed(2)} km`;
+        elDist.className = "text-xs font-bold text-fitAmber";
+        if (elStepsStatus) {
+          elStepsStatus.textContent = "Confirmado por BLE";
+          elStepsStatus.className = "text-[10px] text-fitSage font-medium block";
+        }
+
+        const stepProg = Math.min((t.steps || 0) / 10000, 1);
+        const calProg = Math.min((t.calories || 0) / 400, 1);
+        const actProg = Math.min((t.active_minutes || 0) / 60, 1);
+
+        document.getElementById('ringStepsSvg').style.strokeDashoffset = 351.86 * (1 - stepProg);
+        document.getElementById('ringCaloriesSvg').style.strokeDashoffset = 257.61 * (1 - calProg);
+        document.getElementById('ringActiveSvg').style.strokeDashoffset = 163.36 * (1 - actProg);
+      } else {
+        elSteps.textContent = "--";
+        elCal.textContent = "--";
+        elAct.textContent = "--";
+        elDist.textContent = "-- km";
+        elDist.className = "text-xs font-bold text-appMuted";
+        if (elStepsStatus) {
+          elStepsStatus.textContent = "Esperando paquete BLE real";
+          elStepsStatus.className = "text-[10px] text-appMuted block";
+        }
+
+        document.getElementById('ringStepsSvg').style.strokeDashoffset = 351.86;
+        document.getElementById('ringCaloriesSvg').style.strokeDashoffset = 257.61;
+        document.getElementById('ringActiveSvg').style.strokeDashoffset = 163.36;
+      }
+
+      // 2. Frecuencia Cardíaca
+      const hasHr = t.has_real_hr && t.heart_rate_latest !== null && t.heart_rate_latest !== undefined;
+      const elHr = document.getElementById('valHeartRateBpm');
+      const elHrAvg = document.getElementById('valHeartRateAvg');
+      const elSensorBadge = document.getElementById('sensorActiveBadge');
+
+      if (hasHr) {
+        elHr.textContent = t.heart_rate_latest;
+        elHrAvg.textContent = `Promedio hoy: ${t.heart_rate_avg || t.heart_rate_latest} BPM`;
+        if (elSensorBadge) {
+          elSensorBadge.textContent = "Sensor Activo";
+          elSensorBadge.className = "text-fitCoral font-semibold";
+        }
+      } else {
+        elHr.textContent = "--";
+        elHrAvg.textContent = "Esperando paquete BLE real...";
+        if (elSensorBadge) {
+          elSensorBadge.textContent = "Sensor Standby";
+          elSensorBadge.className = "text-appMuted font-semibold";
+        }
+      }
+
+      // 3. Batería (Lectura directa GATT 0x2A19)
+      const hasBat = t.has_real_battery && t.battery !== null && t.battery !== undefined;
+      const elBat = document.getElementById('valBatteryLevel');
+      const elHeaderBat = document.getElementById('headerBatteryVal');
+      const elBarBat = document.getElementById('barBattery');
+      const elBatPill = document.getElementById('batteryPill');
+
+      if (hasBat) {
+        elBat.textContent = `${t.battery}%`;
+        elHeaderBat.textContent = `${t.battery}%`;
+        elBarBat.style.width = `${t.battery}%`;
+        if (elBatPill) elBatPill.classList.remove('hidden');
+      } else {
+        elBat.textContent = "--%";
+        elHeaderBat.textContent = "--%";
+        elBarBat.style.width = "0%";
+      }
+
+      // 4. Oxígeno SpO2
+      const hasSpo2 = t.has_real_spo2 && t.spo2 !== null && t.spo2 !== undefined;
+      const elSpo2 = document.getElementById('valSpO2');
+      const elSpo2Badge = document.getElementById('spo2StatusBadge');
+      if (hasSpo2) {
+        elSpo2.textContent = t.spo2;
+        if (elSpo2Badge) {
+          elSpo2Badge.textContent = "Normal";
+          elSpo2Badge.className = "text-[10px] font-bold text-fitSage bg-fitSage/15 px-2 py-0.5 rounded-full";
+        }
+      } else {
+        elSpo2.textContent = "--";
+        if (elSpo2Badge) {
+          elSpo2Badge.textContent = "Sin lectura";
+          elSpo2Badge.className = "text-[10px] font-bold text-appMuted bg-appCardElevated px-2 py-0.5 rounded-full";
+        }
+      }
+
+      // 5. Fases de Sueño
+      const hasSleep = t.has_real_sleep && t.sleep && t.sleep.total_minutes > 0;
+      if (hasSleep) {
+        const s = t.sleep;
+        const total = (s.deep_minutes || 0) + (s.light_minutes || 0) + (s.rem_minutes || 0);
+        const inBed = total + (s.awake_minutes || 0);
+
+        document.getElementById('valSleepTotalTime').textContent = `${Math.floor(total / 60)}h ${total % 60}m`;
+        document.getElementById('valSleepScore').textContent = `Puntuación ${s.sleep_score || 85}`;
+
+        if (inBed > 0) {
+          document.getElementById('barSleepDeep').style.width = `${(s.deep_minutes / inBed) * 100}%`;
+          document.getElementById('barSleepLight').style.width = `${(s.light_minutes / inBed) * 100}%`;
+          document.getElementById('barSleepRem').style.width = `${(s.rem_minutes / inBed) * 100}%`;
+          document.getElementById('barSleepAwake').style.width = `${(s.awake_minutes / inBed) * 100}%`;
+        }
+
+        document.getElementById('txtSleepDeep').textContent = `${Math.floor((s.deep_minutes || 0) / 60)}h ${(s.deep_minutes || 0) % 60}m`;
+        document.getElementById('txtSleepLight').textContent = `${Math.floor((s.light_minutes || 0) / 60)}h ${(s.light_minutes || 0) % 60}m`;
+        document.getElementById('txtSleepRem').textContent = `${Math.floor((s.rem_minutes || 0) / 60)}h ${(s.rem_minutes || 0) % 60}m`;
+        document.getElementById('txtSleepAwake').textContent = `0h ${s.awake_minutes || 0}m`;
+      } else {
+        document.getElementById('valSleepTotalTime').textContent = "--";
+        document.getElementById('valSleepScore').textContent = "Sin registro hoy";
+        document.getElementById('barSleepDeep').style.width = "0%";
+        document.getElementById('barSleepLight').style.width = "0%";
+        document.getElementById('barSleepRem').style.width = "0%";
+        document.getElementById('barSleepAwake').style.width = "0%";
+        document.getElementById('txtSleepDeep').textContent = "--";
+        document.getElementById('txtSleepLight').textContent = "--";
+        document.getElementById('txtSleepRem').textContent = "--";
+        document.getElementById('txtSleepAwake').textContent = "--";
+      }
+
+      if (hasHr && t.hr_chart && t.hr_chart.length > 0) {
+        updateChartData(t.hr_chart);
+      }
+
+      // Actualizar badge de mapeo si vino en la telemetría
+      if (t.custom_steps_uuid) {
+        updateMappingBadge(t.custom_steps_uuid, t.custom_steps_offset || 0, t.custom_steps_bytes || 4);
+      }
+    }
+
+    // MARK: - Sniffer BLE: Consola de Paquetes
+    function appendPacketToConsole(p, prepend = true) {
+      if (state.isSnifferPaused) return;
+
+      const container = document.getElementById('packetLogsStream');
+      const card = document.createElement('div');
+      card.className = "p-3 rounded-2xl bg-appCardElevated border border-appBorder space-y-1.5 transition-all";
+      card.dataset.char = (p.short_uuid || p.char_uuid || "").toUpperCase();
+      card.dataset.dir = p.direction || "RX";
+
+      const dirColor = p.direction === "TX" ? "bg-fitTerracotta/20 text-fitTerracotta" : "bg-fitAmber/20 text-fitAmber";
+
+      // Renderizar candidatos a pasos detectados
+      let candidatesHtml = '';
+      if (p.step_candidates && p.step_candidates.length > 0) {
+        const items = p.step_candidates.map(c => {
+          const deltaStr = c.is_increment ? `<span class="text-fitSage font-extrabold">(+${c.delta})</span>` : '';
+          const targetChar = p.short_uuid || p.char_uuid || 'FEA1';
+          return `
+            <div class="flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-appBg border border-fitAmber/30 text-[10px]">
+              <span class="text-appMuted">Off ${c.offset} [${c.type}]:</span>
+              <span class="text-fitAmber font-bold">${c.value.toLocaleString()}</span>
+              ${deltaStr}
+              <button onclick="applyStepMapping('${targetChar}', ${c.offset}, ${c.byte_len})" class="ml-1 px-1.5 py-0.5 rounded bg-fitAmber/20 hover:bg-fitAmber text-fitAmber hover:text-black font-extrabold text-[9px] transition-all" title="Asignar este offset a pasos diarios">
+                🎯 Mapear
+              </button>
+            </div>
+          `;
+        }).join('');
+
+        candidatesHtml = `
+          <div class="pt-1.5 border-t border-appBorder/50 space-y-1">
+            <span class="text-[9px] text-appMuted uppercase font-bold flex items-center gap-1">
+              <span>🎯</span> Candidatos detectados (Little-Endian):
+            </span>
+            <div class="flex flex-wrap gap-1.5">
+              ${items}
+            </div>
+          </div>
+        `;
+      }
+
+      card.innerHTML = `
+        <div class="flex items-center justify-between text-[10px]">
+          <div class="flex items-center gap-1.5 font-bold">
+            <span class="px-1.5 py-0.5 rounded font-mono ${dirColor}">${p.direction}</span>
+            <span class="text-appText">Char: ${p.short_uuid || p.char_uuid}</span>
+          </div>
+          <span class="text-appMuted">${p.timestamp || ""}</span>
+        </div>
+        <div class="text-xs font-bold text-appText tracking-wider break-all">
+          <span class="text-fitSage mr-1">HEX:</span>${p.hex_string}
+        </div>
+        <div class="flex flex-wrap items-center justify-between text-[10px] text-appMuted pt-1 border-t border-appBorder/50">
+          <span>UTF8: "${p.utf8_preview || ""}"</span>
+          <span class="text-fitAmber font-bold">${p.decoded_summary || ""}</span>
+        </div>
+        ${p.note ? `<div class="text-[10px] text-fitMauve font-semibold">${p.note}</div>` : ''}
+        ${candidatesHtml}
+      `;
+
+      if (prepend) {
+        container.insertBefore(card, container.firstChild);
+        if (container.children.length > 70) {
+          container.removeChild(container.lastChild);
+        }
+      } else {
+        container.appendChild(card);
+      }
+
+      applyConsoleFilter();
+    }
+
+    function setFilter(tag, btn) {
+      state.packetFilter = tag;
+      document.querySelectorAll('.filter-chip').forEach(b => {
+        b.className = "filter-chip px-3 py-1 rounded-full bg-appCardElevated text-appMuted hover:text-appText whitespace-nowrap";
+      });
+      btn.className = "filter-chip px-3 py-1 rounded-full bg-fitAmber text-black font-bold whitespace-nowrap";
+      applyConsoleFilter();
+    }
+
+    function applyConsoleFilter() {
+      const cards = document.querySelectorAll('#packetLogsStream > div');
+      cards.forEach(card => {
+        const char = card.dataset.char || "";
+        const dir = card.dataset.dir || "";
+        if (state.packetFilter === 'ALL') {
+          card.style.display = 'block';
+        } else if (state.packetFilter === 'TX') {
+          card.style.display = dir === 'TX' ? 'block' : 'none';
+        } else {
+          card.style.display = char.includes(state.packetFilter) ? 'block' : 'none';
+        }
+      });
+    }
+
+    function togglePauseSniffer() {
+      state.isSnifferPaused = !state.isSnifferPaused;
+      const btn = document.getElementById('btnPauseSniffer');
+      btn.textContent = state.isSnifferPaused ? "▶ Reanudar" : "⏸ Pausar";
+      showToast(state.isSnifferPaused ? "Sniffer pausado" : "Sniffer reanudado");
+    }
+
+    function clearPacketLogs() {
+      document.getElementById('packetLogsStream').innerHTML = "";
+      showToast("Consola de paquetes limpia.");
+    }
+
+    // MARK: - Árbol de Servicios y Características
+    function renderServicesTree(services) {
+      const container = document.getElementById('servicesTreeContainer');
+      const badge = document.getElementById('serviceCountBadge');
+      if (!services || !services.length) {
+        badge.textContent = "0 servicios";
+        return;
+      }
+
+      badge.textContent = `${services.length} servicios`;
+      container.innerHTML = services.map(s => `
+        <div class="p-4 rounded-2xl bg-appCardElevated border border-appBorder space-y-3">
+          <div class="flex items-center justify-between">
+            <div>
+              <div class="flex items-center gap-2">
+                <span class="font-mono font-bold text-xs text-appText">0x${s.short_uuid}</span>
+                <span class="font-bold text-xs text-appText">${s.name}</span>
+                ${s.is_proprietary ? '<span class="text-[9px] font-bold px-1.5 py-0.5 rounded bg-fitMauve/20 text-fitMauve">SAMSUNG</span>' : ''}
+              </div>
+              <p class="text-[10px] text-appMuted font-mono mt-0.5">${s.uuid}</p>
+            </div>
+          </div>
+
+          <div class="space-y-2 pt-2 border-t border-appBorder/60">
+            ${s.characteristics.map(c => `
+              <div class="p-2.5 rounded-xl bg-appBg border border-appBorder/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div class="space-y-1">
+                  <div class="flex items-center gap-2">
+                    <span class="font-mono text-xs font-bold text-fitAmber">0x${c.short_uuid}</span>
+                    <span class="text-xs text-appText font-medium">${c.name}</span>
+                  </div>
+                  <div class="flex gap-1 text-[9px] font-mono">
+                    ${c.properties.map(p => `<span class="px-1.5 py-0.5 rounded bg-appCard text-appMuted uppercase">${p}</span>`).join('')}
+                  </div>
+                  <p class="text-[10px] font-mono text-fitSage">Último HEX: ${c.last_hex || '—'}</p>
+                </div>
+
+                <div class="flex items-center gap-1.5 self-end sm:self-center">
+                  ${c.can_read ? `<button onclick="readChar('${c.uuid}')" class="px-2.5 py-1 rounded-lg bg-appCard hover:bg-appCardElevated text-[10px] font-bold text-appText border border-appBorder">Read</button>` : ''}
+                  ${c.can_notify ? `<button onclick="toggleNotifyChar('${c.uuid}')" class="px-2.5 py-1 rounded-lg ${c.is_notifying ? 'bg-fitSage text-black' : 'bg-appCard text-appText'} text-[10px] font-bold border border-appBorder">${c.is_notifying ? 'Notify ON' : 'Notify'}</button>` : ''}
+                  <button onclick="mapChar('steps', '${c.short_uuid}')" class="px-2 py-1 rounded-lg bg-fitAmber/15 hover:bg-fitAmber text-fitAmber hover:text-black text-[10px] font-bold transition-all">
+                    Pasos
+                  </button>
+                  <button onclick="mapChar('heart_rate', '${c.short_uuid}')" class="px-2 py-1 rounded-lg bg-fitCoral/15 hover:bg-fitCoral text-fitCoral hover:text-white text-[10px] font-bold transition-all">
+                    Pulso
+                  </button>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `).join('');
+    }
+
+    // MARK: - Acciones BLE y API Calls
+    async function fetchDevices() {
+      try {
+        const res = await fetch('/api/devices');
+        const data = await res.json();
+        if (data.devices && data.devices.length > 0) {
+          renderDevicesList(data.devices);
+        }
+      } catch (e) {}
+    }
+
+    async function triggerRetrieveConnected() {
+      const btn = document.getElementById('btnRetrieveConnected');
+      const originalHtml = btn ? btn.innerHTML : '';
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = `<span class="animate-spin inline-block">⏳</span> Buscando en macOS...`;
+      }
+      showToast("Consultando CoreBluetooth por reloj ya enlazado en macOS...");
+
+      try {
+        const res = await fetch('/api/retrieve-connected', { method: 'POST' });
+        const data = await res.json();
+        renderDevicesList(data.devices || []);
+        showToast(data.message || `Dispositivos encontrados: ${data.count || 0}`);
+      } catch (e) {
+        showToast("Error al consultar dispositivos enlazados.", true);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = originalHtml;
+        }
+      }
+    }
+
+    async function triggerScan() {
+      const btn = document.getElementById('btnScanBle');
+      btn.disabled = true;
+      btn.innerHTML = `<span class="animate-spin inline-block">⏳</span> Escaneando...`;
+      showToast("Iniciando escaneo BLE de anuncios (6s)...");
+
+      try {
+        const res = await fetch('/api/scan', { method: 'POST' });
+        const data = await res.json();
+        renderDevicesList(data.devices || []);
+        showToast(`Escaneo finalizado: ${data.count || 0} dispositivos.`);
+      } catch (e) {
+        showToast("Error al escanear BLE.", true);
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = `<span>🔍</span> Escanear Anuncios`;
+      }
+    }
+
+    function renderDevicesList(devices) {
+      const container = document.getElementById('devicesContainer');
+      if (!devices.length) {
+        container.innerHTML = `<div class="p-4 text-center text-xs text-appMuted bg-appCardElevated rounded-2xl border border-appBorder">No se encontraron dispositivos BLE cercanos ni enlazados en macOS.</div>`;
+        return;
+      }
+
+      container.innerHTML = devices.map(d => `
+        <div class="p-3.5 rounded-2xl ${d.is_connected_system ? 'bg-fitSage/10 border-fitSage/40 shadow-sm' : (d.is_fit3 ? 'bg-fitAmber/10 border-fitAmber/40' : 'bg-appCardElevated border-appBorder')} border flex items-center justify-between gap-3">
+          <div class="space-y-1">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="font-bold text-xs text-appText">${d.name}</span>
+              ${d.is_fit3 ? '<span class="text-[9px] font-extrabold px-1.5 py-0.5 rounded bg-fitAmber text-black">GALAXY FIT 3</span>' : ''}
+              ${d.is_connected_system ? '<span class="text-[9px] font-bold px-2 py-0.5 rounded bg-fitSage/20 text-fitSage border border-fitSage/40 flex items-center gap-1"><span>⚡</span> YA ENLAZADO A MACOS</span>' : ''}
+            </div>
+            <p class="text-[10px] text-appMuted font-mono">${d.address} • RSSI: ${d.rssi} dBm ${d.system_status ? `• <span class="text-fitSage font-medium">${d.system_status}</span>` : ''}</p>
+          </div>
+          <button onclick="connectDevice('${d.address}', this)" class="px-3.5 py-1.5 rounded-xl ${d.is_connected_system ? 'bg-fitSage text-black font-extrabold shadow-sm' : (d.is_fit3 ? 'bg-fitAmber text-black font-bold' : 'bg-appCard text-appText font-medium border border-appBorder')} text-xs hover:brightness-105 transition-all whitespace-nowrap">
+            ${d.is_connected_system ? 'Conectar Directo' : 'Conectar'}
+          </button>
+        </div>
+      `).join('');
+    }
+
+    async function connectDevice(address, btnElement = null) {
+      const originalText = btnElement ? btnElement.innerHTML : null;
+      if (btnElement) {
+        btnElement.disabled = true;
+        btnElement.innerHTML = `<span class="animate-spin inline-block">⏳</span> Conectando...`;
+      }
+      showToast(`Conectando con ${address}...`);
+      try {
+        const res = await fetch('/api/connect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ address })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          showToast(`¡Conectado exitosamente con ${data.name}!`);
+          if (btnElement) {
+            btnElement.innerHTML = `✅ Conectado`;
+            btnElement.disabled = true;
+          }
+          fetchServices();
+          fetchStatus();
+          fetchTelemetry();
+        } else {
+          showToast(data.detail || "Error al conectar.", true);
+          if (btnElement) {
+            btnElement.disabled = false;
+            btnElement.innerHTML = originalText;
+          }
+        }
+      } catch (e) {
+        showToast("Error de conexión BLE. Revisa permisos Bluetooth de macOS.", true);
+        if (btnElement) {
+          btnElement.disabled = false;
+          btnElement.innerHTML = originalText;
+        }
+      }
+    }
+
+    async function handleQuickConnect() {
+      if (document.getElementById('connBadge').textContent.includes('Conectado')) {
+        await fetch('/api/disconnect', { method: 'POST' });
+        showToast("Reloj desconectado.");
+      } else {
+        switchTab('sniffer');
+        await triggerRetrieveConnected();
+      }
+    }
+
+    async function toggleMockMode() {
+      const targetState = !state.isMockMode;
+      try {
+        const res = await fetch('/api/mock/toggle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: targetState })
+        });
+        const data = await res.json();
+        showToast(targetState ? "🧪 Modo Simulación activado" : "📡 Modo BLE Real activado");
+      } catch (e) {
+        showToast("Error al alternar modo simulación.");
+      }
+    }
+
+    async function subscribeAllNotifiable() {
+      showToast("Suscribiendo a todas las características...");
+      try {
+        const res = await fetch('/api/characteristics/notify-all', { method: 'POST' });
+        const data = await res.json();
+        showToast(`Suscripción activa en ${data.subscribed_count} características.`);
+        fetchServices();
+      } catch (e) {
+        showToast("Error al suscribir.");
+      }
+    }
+
+    async function readChar(uuid) {
+      showToast(`Leyendo ${uuid}...`);
+      try {
+        const res = await fetch('/api/characteristics/read', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uuid })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          showToast(`Leído: ${data.hex_value}`);
+        } else {
+          showToast(data.detail || "No se pudo leer.");
+        }
+      } catch (e) {
+        showToast("Error de lectura BLE.");
+      }
+    }
+
+    async function toggleNotifyChar(uuid) {
+      try {
+        const res = await fetch('/api/characteristics/notify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uuid })
+        });
+        const data = await res.json();
+        showToast(`Notificación: ${data.status}`);
+        fetchServices();
+      } catch (e) {
+        showToast("Error al cambiar notificación.");
+      }
+    }
+
+    function updateMappingBadge(uuid, offset, byteLen) {
+      const badge = document.getElementById('currentMappingBadge');
+      if (badge) {
+        badge.textContent = `UUID: ${uuid.toUpperCase()} • Off: ${offset} • u${byteLen * 8}LE`;
+      }
+      const inpUuid = document.getElementById('mapStepsUuidInput');
+      const inpOff = document.getElementById('mapStepsOffsetInput');
+      const selBytes = document.getElementById('mapStepsBytesSelect');
+      if (inpUuid && document.activeElement !== inpUuid) inpUuid.value = uuid.toUpperCase();
+      if (inpOff && document.activeElement !== inpOff) inpOff.value = offset;
+      if (selBytes && document.activeElement !== selBytes) selBytes.value = byteLen;
+    }
+
+    async function fetchStepsMapping() {
+      try {
+        const res = await fetch('/api/mapping/steps');
+        const data = await res.json();
+        if (data.uuid) {
+          updateMappingBadge(data.uuid, data.offset || 0, data.byte_length || 4);
+        }
+      } catch (e) {}
+    }
+
+    async function saveCustomStepsMapping() {
+      const uuid = document.getElementById('mapStepsUuidInput').value.trim();
+      const offset = parseInt(document.getElementById('mapStepsOffsetInput').value, 10) || 0;
+      const byte_length = parseInt(document.getElementById('mapStepsBytesSelect').value, 10) || 4;
+      if (!uuid) return;
+
+      try {
+        const res = await fetch('/api/characteristics/map', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target: 'steps', uuid, offset, byte_length })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          updateMappingBadge(uuid, offset, byte_length);
+          showToast(`✅ Mapeo guardado: ${uuid.toUpperCase()} (Off: ${offset}, u${byte_length * 8}LE)`);
+          fetchTelemetry();
+        } else {
+          showToast(data.detail || "Error al guardar mapeo.", true);
+        }
+      } catch (e) {
+        showToast("Error al guardar mapeo.", true);
+      }
+    }
+
+    async function applyStepMapping(uuid, offset, byteLen) {
+      const inpUuid = document.getElementById('mapStepsUuidInput');
+      const inpOff = document.getElementById('mapStepsOffsetInput');
+      const selBytes = document.getElementById('mapStepsBytesSelect');
+      if (inpUuid) inpUuid.value = uuid.toUpperCase();
+      if (inpOff) inpOff.value = offset;
+      if (selBytes) selBytes.value = byteLen;
+      await saveCustomStepsMapping();
+    }
+
+    async function mapChar(target, uuid) {
+      if (target === 'steps') {
+        const inpOff = document.getElementById('mapStepsOffsetInput');
+        const offset = inpOff ? parseInt(inpOff.value, 10) || 0 : 0;
+        const selBytes = document.getElementById('mapStepsBytesSelect');
+        const byteLen = selBytes ? parseInt(selBytes.value, 10) || 4 : 4;
+        await applyStepMapping(uuid, offset, byteLen);
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/characteristics/map', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target, uuid })
+        });
+        showToast(`UUID ${uuid} asignado a ${target.toUpperCase()}`);
+      } catch (e) {
+        showToast("Error al mapear característica.");
+      }
+    }
+
+    async function purgeDemoDataFromDb() {
+      if (!confirm("¿Deseas purgar de SQLite todos los registros de demostración antiguos generados por la semilla?")) return;
+      try {
+        const res = await fetch('/api/database/purge-demo', { method: 'POST' });
+        const data = await res.json();
+        showToast(data.message || "Datos demo purgados exitosamente.");
+        fetchDataRecords();
+        fetchTelemetry();
+      } catch (e) {
+        showToast("Error al purgar datos demo.", true);
+      }
+    }
+
+    async function sendCustomHex() {
+      const uuid = document.getElementById('txCharUuidInput').value.trim();
+      const hex_payload = document.getElementById('txHexPayloadInput').value.trim();
+      if (!uuid || !hex_payload) return;
+
+      try {
+        const res = await fetch('/api/characteristics/write', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uuid, hex_payload })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          showToast(`TX enviado a ${uuid}`);
+        } else {
+          showToast(data.detail || "Error al enviar TX.");
+        }
+      } catch (e) {
+        showToast("Error al enviar comando.");
+      }
+    }
+
+    // MARK: - Base de Datos Local & Exportación en macOS
+    async function fetchDataRecords() {
+      try {
+        const res = await fetch('/api/data/records');
+        const data = await res.json();
+        const tables = data.tables || {};
+        
+        const hrCount = (tables.heart_rate || []).length;
+        const packetCount = (tables.ble_packets || []).length;
+        
+        const elHr = document.getElementById('dataCountHr');
+        const elPackets = document.getElementById('dataCountPackets');
+        if (elHr) elHr.textContent = hrCount;
+        if (elPackets) elPackets.textContent = packetCount;
+
+        const tbody = document.getElementById('dataTableBody');
+        if (!tbody) return;
+
+        const rows = [];
+        (tables.heart_rate || []).slice(0, 15).forEach(r => {
+          const time = r.timestamp ? (r.timestamp.split('T')[1]?.substring(0, 8) || r.timestamp) : '--';
+          rows.push(`
+            <tr class="hover:bg-appCardElevated/50 transition-colors">
+              <td class="py-2.5 px-2 text-appMuted">${time}</td>
+              <td class="py-2.5 px-2 text-fitCoral font-bold">Frecuencia Cardíaca</td>
+              <td class="py-2.5 px-2 text-appText font-bold">${r.bpm} BPM</td>
+              <td class="py-2.5 px-2 text-appMuted text-[10px]">${r.source || 'BLE'}</td>
+            </tr>
+          `);
+        });
+
+        (tables.steps || []).slice(0, 5).forEach(s => {
+          rows.push(`
+            <tr class="hover:bg-appCardElevated/50 transition-colors">
+              <td class="py-2.5 px-2 text-appMuted">${s.day_date || '--'}</td>
+              <td class="py-2.5 px-2 text-fitAmber font-bold">Pasos del Día</td>
+              <td class="py-2.5 px-2 text-appText font-bold">${s.steps} pasos (${s.calories} kcal)</td>
+              <td class="py-2.5 px-2 text-appMuted text-[10px]">${s.source || 'BLE'}</td>
+            </tr>
+          `);
+        });
+
+        tbody.innerHTML = rows.length ? rows.join('') : `<tr><td colspan="4" class="py-4 text-center text-appMuted">Sin registros en la base de datos aún.</td></tr>`;
+      } catch (e) {
+        console.error("Error al obtener registros SQLite:", e);
+      }
+    }
+
+    // MARK: - Fetchers Auxiliares
+    async function fetchStatus() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        updateStatusUI(data);
+      } catch (e) {}
+    }
+
+    async function fetchTelemetry() {
+      try {
+        const res = await fetch('/api/health/summary');
+        const data = await res.json();
+        updateTelemetryUI(data);
+      } catch (e) {}
+    }
+
+    async function fetchServices() {
+      try {
+        const res = await fetch('/api/services');
+        const data = await res.json();
+        renderServicesTree(data.services || []);
+      } catch (e) {}
+    }
+
+    // MARK: - Toast Notifier
+    let toastTimeout = null;
+    function showToast(msg, isError = false) {
+      const el = document.getElementById('toastNotification');
+      const icon = document.getElementById('toastIcon');
+      if (icon) {
+        icon.textContent = isError ? '⚠️' : 'ℹ️';
+      }
+      document.getElementById('toastMsg').textContent = msg;
+      el.classList.remove('translate-y-24', 'opacity-0');
+      clearTimeout(toastTimeout);
+      toastTimeout = setTimeout(() => {
+        el.classList.add('translate-y-24', 'opacity-0');
+      }, isError ? 6000 : 3200);
+    }
+  </script>
+</body>
+</html>
+
+==> run.sh <==
+#!/usr/bin/env bash
+set -e
+
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+cd "$DIR"
+
+echo "=========================================================="
+echo "          🚀 Iniciando Fit3 Mac Studio                    "
+echo "    Samsung Galaxy Fit 3 (SM-R390) • BLE macOS Monterey   "
+echo "=========================================================="
+
+# 1. Comprobar Python 3
+if ! command -v python3 &> /dev/null; then
+    echo "❌ Error: Python 3 no está instalado en este Mac."
+    exit 1
+fi
+
+# 2. Crear entorno virtual si no existe
+if [ ! -d "venv" ]; then
+    echo "📦 Creando entorno virtual 'venv' en Python 3..."
+    python3 -m venv venv
+fi
+
+# 3. Activar venv e instalar dependencias
+echo "🔄 Verificando librerías (FastAPI, Bleak, Uvicorn)..."
+venv/bin/pip install -r requirements.txt --quiet
+
+echo ""
+echo "✅ Servidor preparado para recolectar y visualizar métricas:"
+echo "   💻 Panel en tu Mac:  http://localhost:8000"
+echo "=========================================================="
+echo ""
+
+# 5. Abrir la app en el navegador del Mac en segundo plano
+(sleep 1.5 && open "http://localhost:8000" 2>/dev/null || true) &
+
+# 6. Lanzar servidor FastAPI escuchando en 0.0.0.0:8000
+exec venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+==> requirements.txt <==
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+bleak>=0.22.0
+pydantic>=2.0.0
+websockets>=12.0
