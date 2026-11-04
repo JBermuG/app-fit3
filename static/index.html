@@ -135,7 +135,7 @@
               <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-fitSage/20 text-fitSage border border-fitSage/30">SM-R390</span>
             </div>
             <p id="cardDeviceAddress" class="text-xs text-appMuted font-mono">Bluetooth Low Energy • CoreBluetooth</p>
-            <p id="cardDeviceStatusMsg" class="text-xs text-fitAmber mt-0.5 font-medium">Modo Simulación activo para pruebas</p>
+            <p id="cardDeviceStatusMsg" class="text-xs text-appMuted mt-0.5 font-medium">Esperando conexión Bluetooth con tu Galaxy Fit3</p>
           </div>
         </div>
 
@@ -158,7 +158,7 @@
             <span class="font-bold text-sm text-appText flex items-center gap-2">
               <span class="text-fitTerracotta">🔥</span> Actividad Diaria
             </span>
-            <span id="distanceKmBadge" class="text-xs font-bold text-fitAmber">5.06 km</span>
+            <span id="distanceKmBadge" class="text-xs font-bold text-appMuted">-- km</span>
           </div>
 
           <div class="flex items-center justify-center my-4 relative">
@@ -166,17 +166,17 @@
               <!-- Anillo 1: Pasos (r=56, C=351.86) -->
               <circle cx="70" cy="70" r="56" stroke="rgba(229,154,82,0.15)" stroke-width="12" fill="none" />
               <circle id="ringStepsSvg" cx="70" cy="70" r="56" stroke="#E59A52" stroke-width="12" fill="none"
-                      stroke-linecap="round" stroke-dasharray="351.86" stroke-dashoffset="110" class="transition-all duration-700" />
+                      stroke-linecap="round" stroke-dasharray="351.86" stroke-dashoffset="351.86" class="transition-all duration-700" />
 
               <!-- Anillo 2: Calorías (r=41, C=257.61) -->
               <circle cx="70" cy="70" r="41" stroke="rgba(217,107,67,0.15)" stroke-width="12" fill="none" />
               <circle id="ringCaloriesSvg" cx="70" cy="70" r="41" stroke="#D96B43" stroke-width="12" fill="none"
-                      stroke-linecap="round" stroke-dasharray="257.61" stroke-dashoffset="75" class="transition-all duration-700" />
+                      stroke-linecap="round" stroke-dasharray="257.61" stroke-dashoffset="257.61" class="transition-all duration-700" />
 
               <!-- Anillo 3: Tiempo Activo (r=26, C=163.36) -->
               <circle cx="70" cy="70" r="26" stroke="rgba(138,176,130,0.15)" stroke-width="12" fill="none" />
               <circle id="ringActiveSvg" cx="70" cy="70" r="26" stroke="#8AB082" stroke-width="12" fill="none"
-                      stroke-linecap="round" stroke-dasharray="163.36" stroke-dashoffset="30" class="transition-all duration-700" />
+                      stroke-linecap="round" stroke-dasharray="163.36" stroke-dashoffset="163.36" class="transition-all duration-700" />
             </svg>
             <div class="absolute text-2xl">🚶</div>
           </div>
@@ -186,19 +186,22 @@
               <span class="flex items-center gap-1.5 text-appMuted">
                 <span class="w-2.5 h-2.5 rounded-full bg-fitAmber inline-block"></span> Pasos
               </span>
-              <span class="font-extrabold text-sm"><span id="valSteps" class="text-appText">6,842</span> <span class="text-appMuted text-[10px]">/ 10,000</span></span>
+              <div class="text-right">
+                <span class="font-extrabold text-sm"><span id="valSteps" class="text-appText">--</span> <span class="text-appMuted text-[10px]">/ 10,000</span></span>
+                <span id="stepsStatusBadge" class="text-[10px] text-appMuted block">Esperando paquete BLE real</span>
+              </div>
             </div>
             <div class="flex justify-between items-center text-xs">
               <span class="flex items-center gap-1.5 text-appMuted">
                 <span class="w-2.5 h-2.5 rounded-full bg-fitTerracotta inline-block"></span> Calorías activas
               </span>
-              <span class="font-extrabold text-sm"><span id="valCalories" class="text-appText">287</span> <span class="text-appMuted text-[10px]">/ 400 kcal</span></span>
+              <span class="font-extrabold text-sm"><span id="valCalories" class="text-appText">--</span> <span class="text-appMuted text-[10px]">/ 400 kcal</span></span>
             </div>
             <div class="flex justify-between items-center text-xs">
               <span class="flex items-center gap-1.5 text-appMuted">
                 <span class="w-2.5 h-2.5 rounded-full bg-fitSage inline-block"></span> Tiempo activo
               </span>
-              <span class="font-extrabold text-sm"><span id="valActiveMins" class="text-appText">54</span> <span class="text-appMuted text-[10px]">/ 60 min</span></span>
+              <span class="font-extrabold text-sm"><span id="valActiveMins" class="text-appText">--</span> <span class="text-appMuted text-[10px]">/ 60 min</span></span>
             </div>
           </div>
         </div>
@@ -211,7 +214,7 @@
               <h3 class="font-bold text-sm text-appText">Frecuencia Cardíaca en Tiempo Real</h3>
             </div>
             <div class="flex items-baseline gap-1">
-              <span id="valHeartRateBpm" class="text-3xl font-black text-fitCoral">74</span>
+              <span id="valHeartRateBpm" class="text-3xl font-black text-fitCoral">--</span>
               <span class="text-xs font-bold text-appMuted">BPM</span>
             </div>
           </div>
@@ -222,9 +225,9 @@
           </div>
 
           <div class="flex items-center justify-between text-xs text-appMuted pt-2 border-t border-appBorder">
-            <span id="valHeartRateAvg">Promedio hoy: 72 BPM</span>
+            <span id="valHeartRateAvg">Esperando paquete BLE real...</span>
             <span class="font-mono text-[10px] text-appMuted">Servicio GATT 0x180D (0x2A37)</span>
-            <span class="text-fitCoral font-semibold">Sensor Activo</span>
+            <span id="sensorActiveBadge" class="text-appMuted font-semibold">Sensor Standby</span>
           </div>
         </div>
 
@@ -240,13 +243,13 @@
               <span class="text-xs text-appMuted font-bold uppercase tracking-wider flex items-center gap-1.5">
                 <span>🫁</span> Oxígeno (SpO2)
               </span>
-              <span class="text-[10px] font-bold text-fitSage bg-fitSage/15 px-2 py-0.5 rounded-full">Normal</span>
+              <span id="spo2StatusBadge" class="text-[10px] font-bold text-appMuted bg-appCardElevated px-2 py-0.5 rounded-full">Sin lectura</span>
             </div>
             <div class="mt-3 flex items-baseline gap-2">
-              <span id="valSpO2" class="text-3xl font-black text-fitSage">98</span>
+              <span id="valSpO2" class="text-3xl font-black text-fitSage">--</span>
               <span class="text-sm font-bold text-appMuted">%</span>
             </div>
-            <p class="text-xs text-appMuted mt-1">Saturación en reposo óptima</p>
+            <p class="text-xs text-appMuted mt-1">Saturación de oxígeno en sangre</p>
           </div>
 
           <div class="bg-appCard border border-appBorder rounded-3xl p-5 shadow-sm">
@@ -254,12 +257,12 @@
               <span class="text-xs text-appMuted font-bold uppercase tracking-wider flex items-center gap-1.5">
                 <span>🔋</span> Batería del Reloj
               </span>
-              <span id="valBatteryLevel" class="text-xl font-bold text-fitAmber">86%</span>
+              <span id="valBatteryLevel" class="text-xl font-bold text-fitAmber">--%</span>
             </div>
             <div class="w-full bg-appCardElevated h-2.5 rounded-full overflow-hidden mt-3">
-              <div id="barBattery" class="bg-fitAmber h-full rounded-full transition-all duration-500" style="width: 86%;"></div>
+              <div id="barBattery" class="bg-fitAmber h-full rounded-full transition-all duration-500" style="width: 0%;"></div>
             </div>
-            <p class="text-xs text-appMuted mt-2">GATT Service 0x180F (0x2A19)</p>
+            <p class="text-xs text-appMuted mt-2">Lectura directa GATT 0x180F (0x2A19)</p>
           </div>
         </div>
 
@@ -269,23 +272,23 @@
             <span class="font-bold text-sm text-appText flex items-center gap-2">
               <span class="text-fitMauve">🌙</span> Registro de Sueño
             </span>
-            <span id="valSleepScore" class="text-xs font-bold px-3 py-1 rounded-full bg-fitMauve/20 text-fitMauve border border-fitMauve/30">
-              Puntuación 87
+            <span id="valSleepScore" class="text-xs font-bold px-3 py-1 rounded-full bg-appCardElevated text-appMuted border border-appBorder">
+              Sin registro hoy
             </span>
           </div>
 
           <div class="my-4">
             <div class="flex items-baseline gap-2 mb-2">
-              <span id="valSleepTotalTime" class="text-2xl font-black text-appText">7h 06m</span>
+              <span id="valSleepTotalTime" class="text-2xl font-black text-appText">--</span>
               <span class="text-xs text-appMuted">tiempo total dormido</span>
             </div>
 
             <!-- Barra Segmentada de Fases -->
             <div class="w-full h-4 rounded-lg overflow-hidden flex gap-0.5 bg-appCardElevated">
-              <div id="barSleepDeep" class="bg-fitPlum h-full transition-all duration-500" style="width: 20%;" title="Profundo"></div>
-              <div id="barSleepLight" class="bg-fitMauve h-full transition-all duration-500" style="width: 55%;" title="Ligero"></div>
-              <div id="barSleepRem" class="bg-fitSage h-full transition-all duration-500" style="width: 20%;" title="REM"></div>
-              <div id="barSleepAwake" class="bg-fitCoral h-full transition-all duration-500" style="width: 5%;" title="Despierto"></div>
+              <div id="barSleepDeep" class="bg-fitPlum h-full transition-all duration-500" style="width: 0%;" title="Profundo"></div>
+              <div id="barSleepLight" class="bg-fitMauve h-full transition-all duration-500" style="width: 0%;" title="Ligero"></div>
+              <div id="barSleepRem" class="bg-fitSage h-full transition-all duration-500" style="width: 0%;" title="REM"></div>
+              <div id="barSleepAwake" class="bg-fitCoral h-full transition-all duration-500" style="width: 0%;" title="Despierto"></div>
             </div>
           </div>
 
@@ -293,19 +296,19 @@
           <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-3 border-t border-appBorder text-xs">
             <div class="bg-appCardElevated p-2.5 rounded-xl border border-appBorder">
               <div class="text-appMuted flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-fitPlum"></span> Profundo</div>
-              <div id="txtSleepDeep" class="font-bold text-appText mt-1">1h 28m</div>
+              <div id="txtSleepDeep" class="font-bold text-appText mt-1">--</div>
             </div>
             <div class="bg-appCardElevated p-2.5 rounded-xl border border-appBorder">
               <div class="text-appMuted flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-fitMauve"></span> Ligero</div>
-              <div id="txtSleepLight" class="font-bold text-appText mt-1">4h 02m</div>
+              <div id="txtSleepLight" class="font-bold text-appText mt-1">--</div>
             </div>
             <div class="bg-appCardElevated p-2.5 rounded-xl border border-appBorder">
               <div class="text-appMuted flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-fitSage"></span> REM</div>
-              <div id="txtSleepRem" class="font-bold text-appText mt-1">1h 36m</div>
+              <div id="txtSleepRem" class="font-bold text-appText mt-1">--</div>
             </div>
             <div class="bg-appCardElevated p-2.5 rounded-xl border border-appBorder">
               <div class="text-appMuted flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-fitCoral"></span> Despierto</div>
-              <div id="txtSleepAwake" class="font-bold text-appText mt-1">0h 22m</div>
+              <div id="txtSleepAwake" class="font-bold text-appText mt-1">--</div>
             </div>
           </div>
         </div>
