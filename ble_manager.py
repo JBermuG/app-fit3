@@ -856,7 +856,8 @@ class BLEManager:
             if 30 <= bpm <= 240:
                 self.current_hr = bpm
                 self.has_real_hr = True
-                database.save_heart_rate(bpm=bpm, contact=contact, rr_interval_ms=rr_ms, source="Galaxy Fit3 BLE (Confirmado)")
+                if not self.is_mock_mode:
+                    database.save_heart_rate(bpm=bpm, contact=contact, rr_interval_ms=rr_ms, source="Galaxy Fit3 BLE (Confirmado)")
                 note = f"Pulso real: {bpm} BPM"
 
         # 2. Battery Service GATT (0x2A19)
@@ -865,7 +866,8 @@ class BLEManager:
             if 0 <= level <= 100:
                 self.battery_level = level
                 self.has_real_battery = True
-                database.save_battery(self.battery_level)
+                if not self.is_mock_mode:
+                    database.save_battery(self.battery_level)
                 note = f"Batería real: {self.battery_level}%"
 
         # 3. Device Info (0x2A24 / 0x2A26 / 0x2A29)
@@ -906,13 +908,14 @@ class BLEManager:
                 self.today_calories = round(steps * 0.042, 1)
                 self.today_distance = round(steps * 0.74, 1)
                 self.today_active_minutes = max(self.today_active_minutes or 0, int(steps / 115))
-                database.save_steps(
-                    steps=self.today_steps,
-                    calories=self.today_calories,
-                    distance=self.today_distance,
-                    active_minutes=self.today_active_minutes,
-                    source="Galaxy Fit3 BLE (Confirmado)"
-                )
+                if not self.is_mock_mode:
+                    database.save_steps(
+                        steps=self.today_steps,
+                        calories=self.today_calories,
+                        distance=self.today_distance,
+                        active_minutes=self.today_active_minutes,
+                        source="Galaxy Fit3 BLE (Confirmado)"
+                    )
                 note = f"Pasos confirmados: {steps}"
 
         # Fallback heurístico para tramas con prefijo Samsung FE A1
@@ -929,13 +932,14 @@ class BLEManager:
                 self.today_calories = round(steps * 0.042, 1)
                 self.today_distance = round(steps * 0.74, 1)
                 self.today_active_minutes = max(self.today_active_minutes or 0, int(steps / 115))
-                database.save_steps(
-                    steps=self.today_steps,
-                    calories=self.today_calories,
-                    distance=self.today_distance,
-                    active_minutes=self.today_active_minutes,
-                    source="Galaxy Fit3 BLE (Confirmado)"
-                )
+                if not self.is_mock_mode:
+                    database.save_steps(
+                        steps=self.today_steps,
+                        calories=self.today_calories,
+                        distance=self.today_distance,
+                        active_minutes=self.today_active_minutes,
+                        source="Galaxy Fit3 BLE (Confirmado)"
+                    )
                 note = f"Pasos decodificados: {self.today_steps}"
 
         # 5. Mapeo Heurístico de Fases de Sueño (FE A2 ...)
@@ -948,16 +952,17 @@ class BLEManager:
                 awake = byte_list[offset + 3]
                 now_date = datetime.now().strftime("%Y-%m-%d")
                 self.has_real_sleep = True
-                database.save_sleep_session(
-                    start_time=f"{now_date}T00:15:00",
-                    end_time=f"{now_date}T07:20:00",
-                    deep=deep,
-                    light=light,
-                    rem=rem,
-                    awake=awake,
-                    score=min(98, 65 + int(deep / 4)),
-                    source="Galaxy Fit3 BLE (Confirmado)"
-                )
+                if not self.is_mock_mode:
+                    database.save_sleep_session(
+                        start_time=f"{now_date}T00:15:00",
+                        end_time=f"{now_date}T07:20:00",
+                        deep=deep,
+                        light=light,
+                        rem=rem,
+                        awake=awake,
+                        score=min(98, 65 + int(deep / 4)),
+                        source="Galaxy Fit3 BLE (Confirmado)"
+                    )
                 note = f"Sueño RX: Prof {deep}m / Lig {light}m / REM {rem}m"
 
         # 6. SpO2 Heurístico (FE A3 ...)
@@ -966,22 +971,24 @@ class BLEManager:
             if 85 <= spo2 <= 100:
                 self.current_spo2 = spo2
                 self.has_real_spo2 = True
-                database.save_spo2(spo2, source="Galaxy Fit3 BLE (Confirmado)")
+                if not self.is_mock_mode:
+                    database.save_spo2(spo2, source="Galaxy Fit3 BLE (Confirmado)")
                 note = f"SpO2 real: {spo2}%"
 
         # Actualizar cache de último payload para comparación de deltas
         self._last_char_payloads[char_uuid] = bytes(byte_list)
 
-        # Guardar paquete en SQLite
-        database.save_ble_packet(
-            service_uuid=service_uuid,
-            char_uuid=char_uuid,
-            direction=direction,
-            hex_string=hex_str,
-            raw_bytes=byte_list,
-            decoded_summary=decoded_summary,
-            note=note
-        )
+        # Guardar paquete en SQLite (solo si no es simulación)
+        if not self.is_mock_mode:
+            database.save_ble_packet(
+                service_uuid=service_uuid,
+                char_uuid=char_uuid,
+                direction=direction,
+                hex_string=hex_str,
+                raw_bytes=byte_list,
+                decoded_summary=decoded_summary,
+                note=note
+            )
 
         for s in self.discovered_services:
             for c in s["characteristics"]:
