@@ -213,14 +213,27 @@ def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
 
 # MARK: - Query Functions
 
+def purge_demo_data():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM steps WHERE source LIKE '%Demo%'")
+    cursor.execute("DELETE FROM heart_rate WHERE source LIKE '%Demo%'")
+    cursor.execute("DELETE FROM sleep_sessions WHERE source LIKE '%Demo%'")
+    cursor.execute("DELETE FROM spo2 WHERE source LIKE '%Demo%'")
+    cursor.execute("DELETE FROM battery WHERE id IN (SELECT id FROM battery ORDER BY id ASC LIMIT 2)") # limpia semilla inicial de batería si existía
+    cursor.execute("DELETE FROM ble_packets WHERE service_uuid LIKE '%Mock%' OR char_uuid LIKE '%Mock%'")
+    conn.commit()
+    conn.close()
+
 def get_today_summary() -> Dict[str, Any]:
     today_str = date.today().isoformat()
     conn = get_connection()
     cursor = conn.cursor()
 
     # Steps
-    cursor.execute("SELECT * FROM steps WHERE day_date = ?", (today_str,))
+    cursor.execute("SELECT * FROM steps WHERE day_date = ? AND source NOT LIKE '%Demo%'", (today_str,))
     step_row = cursor.fetchone()
+    has_real_steps = step_row is not None
     steps_data = dict(step_row) if step_row else {
         "steps": 0,
         "calories": 0.0,
@@ -229,56 +242,78 @@ def get_today_summary() -> Dict[str, Any]:
     }
 
     # Latest Heart Rate
-    cursor.execute("SELECT bpm, timestamp FROM heart_rate ORDER BY id DESC LIMIT 1")
+    cursor.execute("SELECT bpm, timestamp FROM heart_rate WHERE source NOT LIKE '%Demo%' ORDER BY id DESC LIMIT 1")
     hr_row = cursor.fetchone()
-    latest_hr = hr_row["bpm"] if hr_row else 0
+    has_real_hr = hr_row is not None
+    latest_hr = hr_row["bpm"] if hr_row else None
     latest_hr_time = hr_row["timestamp"] if hr_row else None
 
     # Avg Heart Rate Today
-    cursor.execute("SELECT AVG(bpm) as avg_bpm FROM heart_rate WHERE timestamp >= ?", (today_str + "T00:00:00",))
+    cursor.execute("SELECT AVG(bpm) as avg_bpm FROM heart_rate WHERE timestamp >= ? AND source NOT LIKE '%Demo%'", (today_str + "T00:00:00",))
     avg_hr_row = cursor.fetchone()
     avg_hr = int(round(avg_hr_row["avg_bpm"])) if (avg_hr_row and avg_hr_row["avg_bpm"]) else latest_hr
 
     # Latest Battery
     cursor.execute("SELECT level FROM battery ORDER BY id DESC LIMIT 1")
     bat_row = cursor.fetchone()
-    battery_level = bat_row["level"] if bat_row else 85
+    has_real_battery = bat_row is not None
+    battery_level = bat_row["level"] if bat_row else None
 
     # Latest SpO2
-    cursor.execute("SELECT percentage FROM spo2 ORDER BY id DESC LIMIT 1")
+    cursor.execute("SELECT percentage FROM spo2 WHERE source NOT LIKE '%Demo%' ORDER BY id DESC LIMIT 1")
     spo2_row = cursor.fetchone()
-    latest_spo2 = spo2_row["percentage"] if spo2_row else 98
+    has_real_spo2 = spo2_row is not None
+    latest_spo2 = spo2_row["percentage"] if spo2_row else None
 
     # Sleep
-    cursor.execute("SELECT * FROM sleep_sessions WHERE day_date = ?", (today_str,))
+    cursor.execute("SELECT * FROM sleep_sessions WHERE day_date = ? AND source NOT LIKE '%Demo%'", (today_str,))
     sleep_row = cursor.fetchone()
     if not sleep_row:
         # Check most recent sleep
-        cursor.execute("SELECT * FROM sleep_sessions ORDER BY id DESC LIMIT 1")
+        cursor.execute("SELECT * FROM sleep_sessions WHERE source NOT LIKE '%Demo%' ORDER BY id DESC LIMIT 1")
         sleep_row = cursor.fetchone()
 
-    sleep_data = dict(sleep_row) if sleep_row else {
-        "deep_minutes": 88,
-        "light_minutes": 242,
-        "rem_minutes": 96,
-        "awake_minutes": 22,
-        "sleep_score": 87,
-        "start_time": f"{today_str}T00:15:00",
-        "end_time": f"{today_str}T07:21:00"
-    }
-
-    total_sleep_minutes = (sleep_data.get("deep_minutes", 0) +
-                          sleep_data.get("light_minutes", 0) +
-                          sleep_data.get("rem_minutes", 0))
+    has_real_sleep = sleep_row is not None
+    if sleep_row:
+        sleep_data = dict(sleep_row)
+        total_sleep_minutes = (sleep_data.get("deep_minutes", 0) +
+                              sleep_data.get("light_minutes", 0) +
+                              sleep_data.get("rem_minutes", 0))
+        sleep_dict = {
+            "total_minutes": total_sleep_minutes,
+            "deep_minutes": sleep_data.get("deep_minutes", 0),
+            "light_minutes": sleep_data.get("light_minutes", 0),
+            "rem_minutes": sleep_data.get("rem_minutes", 0),
+            "awake_minutes": sleep_data.get("awake_minutes", 0),
+            "sleep_score": sleep_data.get("sleep_score", 0),
+            "start_time": sleep_data.get("start_time"),
+            "end_time": sleep_data.get("end_time")
+        }
+    else:
+        sleep_dict = {
+            "total_minutes": 0,
+            "deep_minutes": 0,
+            "light_minutes": 0,
+            "rem_minutes": 0,
+            "awake_minutes": 0,
+            "sleep_score": 0,
+            "start_time": None,
+            "end_time": None
+        }
 
     # Recent HR points for Chart.js
-    cursor.execute("SELECT bpm, timestamp FROM heart_rate ORDER BY id DESC LIMIT 20")
+    cursor.execute("SELECT bpm, timestamp FROM heart_rate WHERE source NOT LIKE '%Demo%' ORDER BY id DESC LIMIT 20")
     hr_samples = [dict(r) for r in cursor.fetchall()]
     hr_samples.reverse()
 
     conn.close()
 
     return {
+        "has_real_steps": has_real_steps,
+        "has_real_hr": has_real_hr,
+        "has_real_battery": has_real_battery,
+        "has_real_spo2": has_real_spo2,
+        "has_real_sleep": has_real_sleep,
         "steps": steps_data.get("steps", 0),
         "calories": steps_data.get("calories", 0.0),
         "distance_meters": steps_data.get("distance_meters", 0.0),
@@ -288,16 +323,7 @@ def get_today_summary() -> Dict[str, Any]:
         "heart_rate_latest_time": latest_hr_time,
         "battery": battery_level,
         "spo2": latest_spo2,
-        "sleep": {
-            "total_minutes": total_sleep_minutes,
-            "deep_minutes": sleep_data.get("deep_minutes", 0),
-            "light_minutes": sleep_data.get("light_minutes", 0),
-            "rem_minutes": sleep_data.get("rem_minutes", 0),
-            "awake_minutes": sleep_data.get("awake_minutes", 0),
-            "sleep_score": sleep_data.get("sleep_score", 85),
-            "start_time": sleep_data.get("start_time"),
-            "end_time": sleep_data.get("end_time")
-        },
+        "sleep": sleep_dict,
         "hr_chart": hr_samples
     }
 
@@ -310,21 +336,21 @@ def get_apple_health_payload() -> Dict[str, Any]:
         "date": date.today().isoformat(),
         "exported_at": datetime.now().isoformat(),
         "summary": {
-            "steps": summary["steps"],
-            "active_calories_kcal": summary["calories"],
-            "distance_km": round(summary["distance_meters"] / 1000.0, 2),
-            "active_minutes": summary["active_minutes"],
+            "steps": summary["steps"] if summary["has_real_steps"] else 0,
+            "active_calories_kcal": summary["calories"] if summary["has_real_steps"] else 0.0,
+            "distance_km": round((summary["distance_meters"] or 0) / 1000.0, 2) if summary["has_real_steps"] else 0.0,
+            "active_minutes": summary["active_minutes"] if summary["has_real_steps"] else 0,
             "heart_rate_latest_bpm": summary["heart_rate_latest"],
             "heart_rate_avg_bpm": summary["heart_rate_avg"],
             "spo2_percent": summary["spo2"],
-            "sleep_duration_hours": round(summary["sleep"]["total_minutes"] / 60.0, 2),
-            "sleep_score": summary["sleep"]["sleep_score"],
+            "sleep_duration_hours": round(summary["sleep"]["total_minutes"] / 60.0, 2) if summary["has_real_sleep"] else 0.0,
+            "sleep_score": summary["sleep"]["sleep_score"] if summary["has_real_sleep"] else 0,
             "battery_percent": summary["battery"]
         },
         "shortcuts_keys": {
-            "steps": summary["steps"],
+            "steps": summary["steps"] if summary["has_real_steps"] else 0,
             "heart_rate": summary["heart_rate_latest"],
-            "sleep_minutes": summary["sleep"]["total_minutes"],
+            "sleep_minutes": summary["sleep"]["total_minutes"] if summary["has_real_sleep"] else 0,
             "spo2": summary["spo2"]
         }
     }
@@ -338,31 +364,8 @@ def get_recent_packets(limit: int = 60) -> List[Dict[str, Any]]:
     return rows
 
 def seed_initial_demo_data():
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) as count FROM steps")
-    count = cursor.fetchone()["count"]
-    conn.close()
-
-    if count == 0:
-        save_steps(steps=6842, calories=287.4, distance=5063.0, active_minutes=54, source="Galaxy Fit3 (78DC) Demo")
-        save_battery(86)
-        save_spo2(98, source="Galaxy Fit3 (78DC) Demo")
-
-        today_str = date.today().isoformat()
-        save_sleep_session(
-            start_time=f"{today_str}T00:12:00",
-            end_time=f"{today_str}T07:18:00",
-            deep=88,
-            light=242,
-            rem=96,
-            awake=22,
-            score=87,
-            source="Galaxy Fit3 (78DC) Demo"
-        )
-
-        base_bpms = [66, 68, 71, 74, 82, 95, 108, 98, 86, 75, 72, 74]
-        for bpm in base_bpms:
+    """Solo para pruebas manuales si el usuario lo solicita explícitamente."""
+    pass
             save_heart_rate(bpm=bpm, contact=True, rr_interval_ms=int(60000 / bpm), source="Galaxy Fit3 (78DC) Demo")
 
 def export_full_database_dict() -> Dict[str, Any]:
