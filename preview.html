@@ -1,0 +1,1796 @@
+<!DOCTYPE html>
+<html lang="es" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Fit3 Link — Interactive iOS Preview (Warm Dark Mode)</title>
+  <style>
+    :root {
+      --bg-main: #12100E;          /* Espresso Carbón Profundo */
+      --bg-card: #1E1A17;          /* Piedra Umber Cálida */
+      --bg-card-elevated: #2A241F; /* Tierra Tostada */
+      --card-border: rgba(245, 232, 214, 0.09);
+      --text-primary: #F7F2EB;     /* Marfil Cálido */
+      --text-secondary: #A89F94;   /* Gris Arena Cálido */
+      --mint-steps: #E59A52;       /* Ámbar Dorado / Miel (Acento Principal) */
+      --cyan-activity: #8AB082;    /* Verde Salvia Orgánico */
+      --coral-heart: #D95F5B;      /* Rojo Arcilla Suave */
+      --orange-calories: #D96B43;  /* Terracota Cobre */
+      --purple-sleep: #B88B9E;     /* Malva Tostado */
+      --indigo-deep: #8C6278;      /* Ciruela Cálido */
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    body {
+      background: radial-gradient(circle at 50% 0%, #29211B 0%, #0B0908 75%);
+      color: var(--text-primary);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 20px 12px 40px;
+    }
+
+    /* Top External Controls Bar (Outside Phone Frame) */
+    .simulator-toolbar {
+      width: 100%;
+      max-width: 430px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(30, 26, 23, 0.88);
+      backdrop-filter: blur(14px);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 10px 14px;
+      margin-bottom: 16px;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .simulator-toolbar .sim-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--mint-steps);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .sim-quick-actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .sim-chip-btn {
+      background: rgba(247, 242, 235, 0.07);
+      color: var(--text-primary);
+      border: 1px solid rgba(247, 242, 235, 0.12);
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .sim-chip-btn:hover {
+      background: rgba(229, 154, 82, 0.22);
+      border-color: var(--mint-steps);
+    }
+
+    .sim-chip-btn:active {
+      transform: scale(0.96);
+    }
+
+    /* iPhone 16 Pro Frame */
+    .iphone-frame {
+      width: 100%;
+      max-width: 412px;
+      height: 852px;
+      background: var(--bg-main);
+      border-radius: 48px;
+      border: 10px solid #2C2520;
+      box-shadow: 0 28px 80px rgba(0, 0, 0, 0.78), 0 0 0 1px rgba(245, 232, 214, 0.08);
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Status Bar & Dynamic Island */
+    .ios-status-bar {
+      height: 48px;
+      padding: 12px 26px 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 13px;
+      font-weight: 600;
+      position: relative;
+      z-index: 20;
+      background: rgba(18, 16, 14, 0.9);
+      backdrop-filter: blur(10px);
+    }
+
+    .dynamic-island {
+      width: 112px;
+      height: 28px;
+      background: #080706;
+      border-radius: 20px;
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      top: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 10px;
+      transition: all 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    .dynamic-island.active-alert {
+      width: 220px;
+      background: #231917;
+      border: 1px solid var(--coral-heart);
+    }
+
+    .island-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--mint-steps);
+      box-shadow: 0 0 6px rgba(229, 154, 82, 0.65);
+    }
+
+    /* Top Navigation Bar */
+    .ios-nav-bar {
+      padding: 10px 18px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(18, 16, 14, 0.92);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid rgba(245, 232, 214, 0.06);
+      z-index: 15;
+    }
+
+    .ios-nav-title {
+      font-size: 26px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      color: var(--text-primary);
+    }
+
+    .mock-pill-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      border: none;
+      transition: all 0.2s ease;
+    }
+
+    .mock-pill-toggle.on {
+      background: rgba(229, 154, 82, 0.2);
+      color: var(--mint-steps);
+      border: 1px solid rgba(229, 154, 82, 0.42);
+    }
+
+    .mock-pill-toggle.off {
+      background: rgba(247, 242, 235, 0.09);
+      color: var(--text-primary);
+      border: 1px solid rgba(247, 242, 235, 0.15);
+    }
+
+    /* Scrollable Main Viewport */
+    .ios-scroll-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px 16px 96px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .ios-scroll-content::-webkit-scrollbar {
+      width: 0px;
+    }
+
+    /* Cards */
+    .sh-card {
+      background: var(--bg-card);
+      border: 1px solid var(--card-border);
+      border-radius: 22px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .sh-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .sh-card-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+
+    /* Connection Banner */
+    .conn-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .watch-avatar {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      background: rgba(229, 154, 82, 0.16);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 22px;
+      color: var(--mint-steps);
+      flex-shrink: 0;
+      transition: all 0.25s ease;
+    }
+
+    .watch-avatar.vibrating {
+      animation: shakeWatch 0.35s infinite;
+      background: rgba(217, 95, 91, 0.25);
+      color: var(--coral-heart);
+    }
+
+    @keyframes shakeWatch {
+      0%, 100% { transform: rotate(0deg); }
+      25% { transform: rotate(-12deg) scale(1.06); }
+      75% { transform: rotate(12deg) scale(1.06); }
+    }
+
+    .badge-ancs {
+      background: rgba(138, 176, 130, 0.22);
+      color: var(--cyan-activity);
+      font-size: 10px;
+      font-weight: 800;
+      padding: 2px 7px;
+      border-radius: 999px;
+    }
+
+    .battery-pill {
+      margin-left: auto;
+      background: rgba(247, 242, 235, 0.06);
+      padding: 6px 11px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    /* Activity Rings Layout */
+    .activity-body {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+
+    .rings-wrapper {
+      position: relative;
+      width: 132px;
+      height: 132px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .rings-wrapper svg {
+      transform: rotate(-90deg);
+      width: 132px;
+      height: 132px;
+    }
+
+    .ring-center-icon {
+      position: absolute;
+      font-size: 20px;
+    }
+
+    .activity-metrics {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      flex: 1;
+    }
+
+    .metric-item-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    .metric-item-value {
+      font-size: 19px;
+      font-weight: 800;
+      margin-top: 1px;
+      color: var(--text-primary);
+    }
+
+    .metric-item-goal {
+      font-size: 11px;
+      color: var(--text-secondary);
+      font-weight: 500;
+    }
+
+    /* Heart Rate Chart */
+    .hr-live-Display {
+      display: flex;
+      align-items: baseline;
+      gap: 4px;
+    }
+
+    .hr-bpm-num {
+      font-size: 24px;
+      font-weight: 900;
+      color: var(--coral-heart);
+    }
+
+    .hr-chart-box {
+      width: 100%;
+      height: 145px;
+      position: relative;
+    }
+
+    .hr-footer {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    /* Two Column Grid (SpO2 & Cadence) */
+    .two-col-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .big-stat {
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+    }
+
+    /* Sleep Bar & Legend */
+    .sleep-bar {
+      width: 100%;
+      height: 16px;
+      display: flex;
+      gap: 4px;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .sleep-segment {
+      height: 100%;
+      border-radius: 5px;
+      transition: width 0.4s ease;
+    }
+
+    .sleep-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .sleep-pill {
+      background: rgba(247, 242, 235, 0.04);
+      padding: 8px 10px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12px;
+    }
+
+    /* Buttons */
+    .btn-mint {
+      width: 100%;
+      background: var(--mint-steps);
+      color: #1A130C;
+      font-weight: 800;
+      font-size: 14px;
+      padding: 13px 16px;
+      border-radius: 14px;
+      border: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: transform 0.12s ease, filter 0.15s ease;
+    }
+
+    .btn-mint:hover {
+      filter: brightness(1.06);
+    }
+
+    .btn-mint:active {
+      transform: scale(0.98);
+    }
+
+    .btn-secondary-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .btn-dark {
+      background: rgba(247, 242, 235, 0.07);
+      color: var(--text-primary);
+      border: 1px solid rgba(247, 242, 235, 0.08);
+      padding: 10px 12px;
+      border-radius: 11px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: background 0.15s ease;
+    }
+
+    .btn-dark:hover {
+      background: rgba(247, 242, 235, 0.13);
+    }
+
+    .btn-find-band {
+      width: 100%;
+      background: rgba(229, 154, 82, 0.14);
+      border: 1px solid rgba(229, 154, 82, 0.32);
+      color: var(--text-primary);
+      padding: 14px;
+      border-radius: 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      cursor: pointer;
+      text-align: left;
+      transition: all 0.2s ease;
+    }
+
+    .btn-find-band.active {
+      background: var(--coral-heart);
+      border-color: var(--coral-heart);
+      color: #fff;
+    }
+
+    /* Segmented Control */
+    .segmented-control {
+      display: flex;
+      background: rgba(247, 242, 235, 0.06);
+      padding: 3px;
+      border-radius: 11px;
+      gap: 3px;
+    }
+
+    .seg-btn {
+      flex: 1;
+      background: transparent;
+      color: var(--text-secondary);
+      border: none;
+      padding: 7px 6px;
+      font-size: 11px;
+      font-weight: 700;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .seg-btn.active {
+      background: #332B24;
+      color: var(--text-primary);
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+    }
+
+    /* Inputs & Switches */
+    .ios-input {
+      width: 100%;
+      background: rgba(0, 0, 0, 0.32);
+      border: 1px solid rgba(247, 242, 235, 0.14);
+      color: var(--text-primary);
+      padding: 9px 12px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    .switch-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 13px;
+    }
+
+    .ios-switch {
+      position: relative;
+      width: 46px;
+      height: 26px;
+      background: rgba(247, 242, 235, 0.18);
+      border-radius: 999px;
+      cursor: pointer;
+      transition: background 0.2s ease;
+      flex-shrink: 0;
+      border: none;
+    }
+
+    .ios-switch.on {
+      background: var(--mint-steps);
+    }
+
+    .ios-switch::after {
+      content: "";
+      position: absolute;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #fff;
+      top: 2px;
+      left: 2px;
+      transition: transform 0.2s ease;
+    }
+
+    .ios-switch.on::after {
+      transform: translateX(20px);
+    }
+
+    /* BLE Sniffer Packet Log Rows */
+    .filter-chips {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+
+    .filter-chips::-webkit-scrollbar {
+      height: 0;
+    }
+
+    .tag-chip {
+      white-space: nowrap;
+      padding: 5px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      background: rgba(247, 242, 235, 0.08);
+      color: var(--text-primary);
+      border: none;
+      cursor: pointer;
+    }
+
+    .tag-chip.active {
+      background: var(--mint-steps);
+      color: #1A130C;
+    }
+
+    .packet-card {
+      background: var(--bg-card);
+      border: 1px solid var(--card-border);
+      border-radius: 14px;
+      padding: 11px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .packet-top {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+    }
+
+    .dir-badge {
+      padding: 2px 6px;
+      border-radius: 99px;
+      font-size: 10px;
+      font-weight: 800;
+    }
+
+    .dir-badge.RX {
+      background: rgba(229, 154, 82, 0.2);
+      color: var(--mint-steps);
+    }
+
+    .dir-badge.TX {
+      background: rgba(217, 107, 67, 0.24);
+      color: var(--orange-calories);
+    }
+
+    .hex-line {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-primary);
+      word-break: break-all;
+    }
+
+    .hex-line span {
+      color: var(--cyan-activity);
+      margin-right: 6px;
+    }
+
+    .decode-line {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: var(--text-secondary);
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .decode-le {
+      color: var(--mint-steps);
+    }
+
+    /* Bottom iOS Tab Bar */
+    .ios-tab-bar {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 76px;
+      background: rgba(22, 19, 16, 0.94);
+      backdrop-filter: blur(18px);
+      border-top: 1px solid rgba(245, 232, 214, 0.08);
+      display: flex;
+      justify-content: space-around;
+      align-items: center;
+      padding-bottom: 12px;
+      z-index: 30;
+    }
+
+    .tab-item {
+      background: none;
+      border: none;
+      color: var(--text-secondary);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: color 0.15s ease;
+    }
+
+    .tab-item.active {
+      color: var(--mint-steps);
+    }
+
+    .tab-icon {
+      font-size: 20px;
+    }
+
+    /* Modal / Sheet */
+    .modal-backdrop {
+      position: absolute;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.68);
+      backdrop-filter: blur(6px);
+      display: none;
+      align-items: flex-end;
+      z-index: 50;
+    }
+
+    .modal-backdrop.open {
+      display: flex;
+    }
+
+    .modal-sheet {
+      width: 100%;
+      max-height: 82%;
+      background: #211C18;
+      border-top-left-radius: 28px;
+      border-top-right-radius: 28px;
+      border-top: 1px solid rgba(245, 232, 214, 0.14);
+      padding: 18px 18px 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      overflow-y: auto;
+    }
+
+    .code-pre {
+      background: #100D0B;
+      border: 1px solid rgba(245, 232, 214, 0.1);
+      border-radius: 12px;
+      padding: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      color: var(--mint-steps);
+      overflow-x: auto;
+      white-space: pre-wrap;
+      max-height: 340px;
+    }
+
+    /* Toast Notification */
+    .ios-toast {
+      position: absolute;
+      top: 56px;
+      left: 18px;
+      right: 18px;
+      background: rgba(38, 32, 27, 0.96);
+      border: 1px solid var(--mint-steps);
+      color: var(--text-primary);
+      padding: 11px 14px;
+      border-radius: 16px;
+      font-size: 12px;
+      font-weight: 600;
+      z-index: 60;
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.55);
+      transform: translateY(-130%);
+      opacity: 0;
+      transition: all 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+      pointer-events: none;
+    }
+
+    .ios-toast.visible {
+      transform: translateY(0);
+      opacity: 1;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Barra superior de pruebas rápidas para el navegador -->
+  <div class="simulator-toolbar">
+    <div class="sim-title">
+      <span>⌚ Fit3 Link — Simulador Cálido</span>
+    </div>
+    <div class="sim-quick-actions">
+      <button class="sim-chip-btn" onclick="injectSteps(500)">+500 Pasos</button>
+      <button class="sim-chip-btn" onclick="injectHeartRateSpike()">⚡ Pico Cardio (118 BPM)</button>
+      <button class="sim-chip-btn" onclick="injectProprietarySleepPacket()">🌙 Trama Sueño RX</button>
+      <button class="sim-chip-btn" onclick="triggerFindBand()">🔔 Probar Vibración</button>
+    </div>
+  </div>
+
+  <!-- Marco del iPhone -->
+  <div class="iphone-frame">
+    <!-- Toast flotante -->
+    <div id="iosToast" class="ios-toast">Listo</div>
+
+    <!-- iOS Status Bar -->
+    <div class="ios-status-bar">
+      <span id="statusClock">10:48</span>
+      <div id="dynamicIsland" class="dynamic-island">
+        <div class="island-dot"></div>
+        <span id="islandText" style="font-size: 10px; color: #E59A52; font-weight: 700;">FIT3 BLE</span>
+      </div>
+      <span>5G 100%</span>
+    </div>
+
+    <!-- Navigation Bar -->
+    <div class="ios-nav-bar">
+      <div id="navTitle" class="ios-nav-title">Fit3 Link</div>
+      <button id="mockToggleBtn" class="mock-pill-toggle on" onclick="toggleMockMode()">
+        <span id="mockToggleIcon">●</span>
+        <span id="mockToggleText">Simulación ON</span>
+      </button>
+    </div>
+
+    <!-- ==================== TAB 0: DASHBOARD SALUD ==================== -->
+    <div id="tab-0" class="ios-scroll-content">
+      <!-- 1. Estado de conexión y batería -->
+      <div class="sh-card">
+        <div class="conn-row">
+          <div id="watchAvatarDash" class="watch-avatar">⌚</div>
+          <div>
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <span id="dashDeviceName" style="font-weight: 800; font-size: 16px;">Galaxy Fit3 (F9A2)</span>
+              <span id="dashAncsBadge" class="badge-ancs">ANCS</span>
+            </div>
+            <div id="dashConnSubtitle" style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
+              Modo Simulación Activo • SM-R390
+            </div>
+          </div>
+          <div class="battery-pill">
+            <span style="color: var(--mint-steps);">🔋</span>
+            <span id="dashBatteryText">86%</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. Anillos de Actividad Diaria -->
+      <div class="sh-card">
+        <div class="sh-card-header">
+          <div class="sh-card-title">
+            <span style="color: var(--orange-calories);">🔥</span>
+            <span>Actividad Diaria</span>
+          </div>
+          <span id="dashDistanceKm" style="font-size: 12px; font-weight: 700; color: var(--mint-steps);">5.06 km</span>
+        </div>
+
+        <div class="activity-body">
+          <div class="rings-wrapper">
+            <svg viewBox="0 0 132 132">
+              <!-- Outer Ring: Steps (Warm Amber Gold #E59A52) -->
+              <circle cx="66" cy="66" r="54" stroke="rgba(229,154,82,0.16)" stroke-width="12" fill="none" />
+              <circle id="ringSteps" cx="66" cy="66" r="54" stroke="#E59A52" stroke-width="12" fill="none"
+                      stroke-linecap="round" stroke-dasharray="339.29" stroke-dashoffset="105" />
+
+              <!-- Middle Ring: Calories (Terracotta Copper #D96B43) -->
+              <circle cx="66" cy="66" r="39" stroke="rgba(217,107,67,0.16)" stroke-width="12" fill="none" />
+              <circle id="ringCalories" cx="66" cy="66" r="39" stroke="#D96B43" stroke-width="12" fill="none"
+                      stroke-linecap="round" stroke-dasharray="245.04" stroke-dashoffset="68" />
+
+              <!-- Inner Ring: Active Mins (Warm Sage #8AB082) -->
+              <circle cx="66" cy="66" r="24" stroke="rgba(138,176,130,0.16)" stroke-width="12" fill="none" />
+              <circle id="ringActive" cx="66" cy="66" r="24" stroke="#8AB082" stroke-width="12" fill="none"
+                      stroke-linecap="round" stroke-dasharray="150.79" stroke-dashoffset="15" />
+            </svg>
+            <div class="ring-center-icon">🚶</div>
+          </div>
+
+          <div class="activity-metrics">
+            <div>
+              <div class="metric-item-label"><span class="dot" style="background: var(--mint-steps);"></span>Pasos</div>
+              <div>
+                <span id="valSteps" class="metric-item-value">6,842</span>
+                <span class="metric-item-goal">/ 10,000</span>
+              </div>
+            </div>
+            <div>
+              <div class="metric-item-label"><span class="dot" style="background: var(--orange-calories);"></span>Calorías Activas</div>
+              <div>
+                <span id="valCalories" class="metric-item-value">287</span>
+                <span class="metric-item-goal">/ 400 kcal</span>
+              </div>
+            </div>
+            <div>
+              <div class="metric-item-label"><span class="dot" style="background: var(--cyan-activity);"></span>Tiempo Activo</div>
+              <div>
+                <span id="valActiveMins" class="metric-item-value">54</span>
+                <span class="metric-item-goal">/ 60 min</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3. Gráfica de Frecuencia Cardíaca (GATT 0x180D) -->
+      <div class="sh-card">
+        <div class="sh-card-header">
+          <div class="sh-card-title">
+            <span style="color: var(--coral-heart);">❤️</span>
+            <span>Frecuencia Cardíaca</span>
+          </div>
+          <div class="hr-live-Display">
+            <span id="valHeartRate" class="hr-bpm-num">74</span>
+            <span style="font-size: 11px; color: var(--text-secondary); font-weight: 700;">BPM</span>
+          </div>
+        </div>
+
+        <div class="hr-chart-box">
+          <svg id="hrChartSvg" width="100%" height="145" viewBox="0 0 340 145" preserveAspectRatio="none"></svg>
+        </div>
+
+        <div class="hr-footer">
+          <span id="hrMinText">Mín: 66 BPM</span>
+          <span style="font-family: monospace;">GATT 0x180D (0x2A37)</span>
+          <span id="hrMaxText">Máx: 108 BPM</span>
+        </div>
+      </div>
+
+      <!-- 4. Fila SpO2 y Cadencia RSC -->
+      <div class="two-col-grid">
+        <div class="sh-card" style="gap: 6px;">
+          <div style="font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 6px;">
+            <span style="color: var(--cyan-activity);">🫁</span> Oxígeno (SpO2)
+          </div>
+          <div>
+            <span id="valSpO2" class="big-stat" style="color: var(--cyan-activity);">98</span>
+            <span style="color: var(--text-secondary); font-weight: 700;">%</span>
+          </div>
+          <div style="font-size: 11px; color: var(--text-secondary);">Nivel normal (95–100%)</div>
+        </div>
+
+        <div class="sh-card" style="gap: 6px;">
+          <div style="font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 6px;">
+            <span style="color: var(--mint-steps);">🏃</span> Cadencia RSC
+          </div>
+          <div>
+            <span id="valCadence" class="big-stat" style="color: var(--mint-steps);">84</span>
+            <span style="color: var(--text-secondary); font-size: 12px; font-weight: 700;">spm</span>
+          </div>
+          <div id="valSpeedKmh" style="font-size: 11px; color: var(--text-secondary);">GATT 0x1814 • 4.8 km/h</div>
+        </div>
+      </div>
+
+      <!-- 5. Fases de Sueño -->
+      <div class="sh-card">
+        <div class="sh-card-header">
+          <div class="sh-card-title">
+            <span style="color: var(--purple-sleep);">🛏️</span>
+            <span>Fases de Sueño</span>
+          </div>
+          <span id="valSleepScore" style="background: rgba(184,139,158,0.22); color: var(--purple-sleep); font-size: 11px; font-weight: 800; padding: 4px 9px; border-radius: 99px;">
+            Puntuación 87
+          </span>
+        </div>
+
+        <div style="display: flex; align-items: baseline; gap: 8px;">
+          <span id="valSleepTotal" style="font-size: 22px; font-weight: 800;">7h 06m</span>
+          <span style="font-size: 12px; color: var(--text-secondary);">tiempo total dormido</span>
+        </div>
+
+        <div class="sleep-bar">
+          <div id="barDeep" class="sleep-segment" style="width: 20%; background: var(--indigo-deep);"></div>
+          <div id="barLight" class="sleep-segment" style="width: 54%; background: var(--purple-sleep);"></div>
+          <div id="barRem" class="sleep-segment" style="width: 21%; background: var(--cyan-activity);"></div>
+          <div id="barAwake" class="sleep-segment" style="width: 5%; background: var(--coral-heart);"></div>
+        </div>
+
+        <div class="sleep-grid">
+          <div class="sleep-pill">
+            <span><span class="dot" style="background: var(--indigo-deep); margin-right: 6px;"></span>Profundo</span>
+            <strong id="txtDeep">1h 28m</strong>
+          </div>
+          <div class="sleep-pill">
+            <span><span class="dot" style="background: var(--purple-sleep); margin-right: 6px;"></span>Ligero</span>
+            <strong id="txtLight">4h 02m</strong>
+          </div>
+          <div class="sleep-pill">
+            <span><span class="dot" style="background: var(--cyan-activity); margin-right: 6px;"></span>REM</span>
+            <strong id="txtRem">1h 36m</strong>
+          </div>
+          <div class="sleep-pill">
+            <span><span class="dot" style="background: var(--coral-heart); margin-right: 6px;"></span>Despierto</span>
+            <strong id="txtAwake">0h 22m</strong>
+          </div>
+        </div>
+      </div>
+
+      <!-- 6. Acceso Rápido Puente Apple Health -->
+      <div class="sh-card">
+        <div class="sh-card-title" style="font-size: 14px;">
+          <span style="color: var(--coral-heart);">♥</span>
+          <span>Puente Apple Health (Sideloadly Ready)</span>
+        </div>
+        <div id="dashSyncStatus" style="font-size: 12px; color: var(--text-secondary);">
+          Listo para exportar registros de SwiftData mediante Atajos de iOS.
+        </div>
+        <button class="btn-mint" onclick="syncWithAppleHealthShortcut()">
+          <span>🔄</span>
+          <span>Sincronizar con Apple Health vía Atajo</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- ==================== TAB 1: DISPOSITIVO & ATAJOS ==================== -->
+    <div id="tab-1" class="ios-scroll-content" style="display: none;">
+      <!-- Cabecera de Dispositivo -->
+      <div class="sh-card">
+        <div class="conn-row">
+          <div id="watchAvatarDev" class="watch-avatar">⌚</div>
+          <div>
+            <div style="font-size: 18px; font-weight: 800;">Galaxy Fit3 (F9A2)</div>
+            <div style="font-size: 12px; color: var(--text-secondary);">Modelo: SM-R390 • FW: R390XXU0AXB4</div>
+            <div id="devBannerMsg" style="font-size: 11px; color: var(--mint-steps); margin-top: 3px;">
+              GATT listo (4 servicios). Sniffer BLE activo.
+            </div>
+          </div>
+        </div>
+        <div style="display: flex; justify-content: space-between; padding-top: 10px; border-top: 1px solid rgba(245,232,214,0.08); font-size: 12px;">
+          <div><span style="color: var(--text-secondary);">Batería:</span> <strong>86%</strong></div>
+          <div><span style="color: var(--text-secondary);">RSSI:</span> <strong>-51 dBm</strong></div>
+          <div><span style="color: var(--text-secondary);">Background:</span> <strong style="color: var(--mint-steps);">Activo</strong></div>
+        </div>
+      </div>
+
+      <!-- Encontrar mi pulsera & ANCS -->
+      <div class="sh-card">
+        <div class="sh-card-title">Acciones Rápidas y Notificaciones</div>
+
+        <button id="btnFindMyBand" class="btn-find-band" onclick="triggerFindBand()">
+          <span id="findBandIcon" style="font-size: 24px;">🔔</span>
+          <div style="flex: 1;">
+            <div id="findBandTitle" style="font-weight: 800; font-size: 14px;">Encontrar mi pulsera (Alerta BLE)</div>
+            <div style="font-size: 11px; opacity: 0.82;">Envía comando GATT 0x1802 / Trama de vibración Samsung</div>
+          </div>
+          <span>›</span>
+        </button>
+
+        <div style="background: rgba(247,242,235,0.04); padding: 12px; border-radius: 14px; display: flex; align-items: center; gap: 12px;">
+          <span style="font-size: 22px;">🛡️</span>
+          <div style="flex: 1;">
+            <div id="ancsStatusTitle" style="font-size: 13px; font-weight: 700;">ANCS y AMS Habilitados (Bonding Activo)</div>
+            <div style="font-size: 11px; color: var(--text-secondary);">
+              Recibe notificaciones de WhatsApp/llamadas del iPhone y controla la música desde el reloj.
+            </div>
+          </div>
+          <button class="sim-chip-btn" style="color: var(--mint-steps);" onclick="simulateANCSBonding()">Enlazar</button>
+        </div>
+      </div>
+
+      <!-- Puente con Apple Health -->
+      <div class="sh-card">
+        <div class="sh-card-header">
+          <div class="sh-card-title">
+            <span style="color: var(--coral-heart);">♥</span>
+            <span>Sincronización con Apple Health</span>
+          </div>
+          <button class="sim-chip-btn" style="color: var(--cyan-activity);" onclick="openModal('guideModal')">
+            ¿Cómo crear Atajo?
+          </button>
+        </div>
+
+        <div class="segmented-control">
+          <button id="segSyncShortcuts" class="seg-btn active" onclick="setSyncMethod('shortcuts')">
+            Puente Atajos iOS (Free)
+          </button>
+          <button id="segSyncHK" class="seg-btn" onclick="setSyncMethod('healthkit')">
+            HealthKit Directo
+          </button>
+        </div>
+
+        <div>
+          <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 5px;">Nombre del Atajo en iOS:</div>
+          <input id="shortcutNameInput" class="ios-input" type="text" value="Fit3 Health Sync" />
+        </div>
+
+        <button class="btn-mint" onclick="syncWithAppleHealthShortcut()">
+          <span>⚡</span>
+          <span>Sincronizar con Apple Health vía Atajo</span>
+        </button>
+
+        <div class="btn-secondary-row">
+          <button class="btn-dark" onclick="copyHealthJSON()">📋 Copiar JSON</button>
+          <button class="btn-dark" onclick="showHealthJSONModal()">｛｝ Ver Payload JSON</button>
+        </div>
+
+        <div id="devSyncStatus" style="font-size: 11px; color: var(--text-secondary);">
+          Sin requerir el entitlement de pago com.apple.developer.healthkit en Sideloadly.
+        </div>
+      </div>
+
+      <!-- Escáner Bluetooth LE -->
+      <div class="sh-card">
+        <div class="sh-card-header">
+          <div class="sh-card-title">📡 Escáner Bluetooth LE</div>
+          <button class="sim-chip-btn" style="color: var(--mint-steps);" onclick="simulateBLEScan()">Buscar Pulsera</button>
+        </div>
+        <div id="scannerList" style="display: flex; flex-direction: column; gap: 8px;">
+          <div style="background: rgba(247,242,235,0.04); padding: 10px 12px; border-radius: 12px; display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <div style="font-size: 13px; font-weight: 700;">Galaxy Fit3 (F9A2) <span class="badge-ancs" style="color: var(--mint-steps); background: rgba(229,154,82,0.2);">FIT 3</span></div>
+              <div style="font-size: 11px; color: var(--text-secondary); font-family: monospace;">RSSI: -51 dBm • UUID: 8A3F19C2...</div>
+            </div>
+            <button class="sim-chip-btn" style="background: var(--mint-steps); color: #1A130C;" onclick="showToast('Conectado a Galaxy Fit3 (F9A2)')">Conectado</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modo Simulación -->
+      <div class="sh-card">
+        <div class="sh-card-title">🧪 Modo Simulación (Mock Mode)</div>
+        <div class="switch-row">
+          <span>Simular Samsung Galaxy Fit 3 Conectada</span>
+          <button id="switchMockDev" class="ios-switch on" onclick="toggleMockMode()"></button>
+        </div>
+        <div class="btn-secondary-row">
+          <button class="btn-dark" style="color: var(--mint-steps);" onclick="populateDemoHistory()">✨ Poblar Historial Demo</button>
+          <button class="btn-dark" style="color: var(--coral-heart);" onclick="showToast('Pulsera eliminada de UserDefaults')">🗑️ Olvidar Pulsera</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== TAB 2: SNIFFER BLE ==================== -->
+    <div id="tab-2" class="ios-scroll-content" style="display: none;">
+      <div class="segmented-control">
+        <button id="segBle0" class="seg-btn active" onclick="switchBleSubtab(0)">Consola Hex (<span id="pktCount">0</span>)</button>
+        <button id="segBle1" class="seg-btn" onclick="switchBleSubtab(1)">Inspector UUIDs (4)</button>
+        <button id="segBle2" class="seg-btn" onclick="switchBleSubtab(2)">Mapeo & TX Hex</button>
+      </div>
+
+      <!-- Subvista 0: Consola en vivo -->
+      <div id="ble-sub-0" style="display: flex; flex-direction: column; gap: 10px;">
+        <div class="filter-chips">
+          <button class="tag-chip active" onclick="setPacketFilter('ALL', this)">Todos</button>
+          <button class="tag-chip" onclick="setPacketFilter('HR', this)">Heart Rate (0x180D)</button>
+          <button class="tag-chip" onclick="setPacketFilter('STEPS', this)">Candidato Pasos</button>
+          <button class="tag-chip" onclick="setPacketFilter('SLEEP', this)">Candidato Sueño</button>
+          <button class="tag-chip" onclick="setPacketFilter('SPO2', this)">Candidato SpO2</button>
+          <button class="tag-chip" onclick="setPacketFilter('TX', this)">Comando TX</button>
+        </div>
+
+        <div style="display: flex; gap: 6px;">
+          <input id="snifferSearchInput" class="ios-input" placeholder="Filtrar por UUID (FEA1, 2A37) o Hex..." oninput="renderPacketLogs()" />
+          <button id="btnPauseSniffer" class="btn-dark" style="white-space: nowrap;" onclick="togglePauseSniffer()">⏸ Pausar</button>
+          <button class="btn-dark" onclick="clearSnifferLogs()">🗑️</button>
+        </div>
+
+        <div id="packetLogsContainer" style="display: flex; flex-direction: column; gap: 8px;"></div>
+      </div>
+
+      <!-- Subvista 1: Inspector de Servicios GATT y UUIDs propietarios -->
+      <div id="ble-sub-1" style="display: none; flex-direction: column; gap: 12px;">
+        <div class="sh-card">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <div style="font-family: monospace; font-weight: 800; font-size: 14px;">Service 0xFD5A</div>
+              <div style="font-size: 12px; color: var(--text-secondary);">Samsung Wearable Health Bus</div>
+            </div>
+            <span class="badge-ancs" style="background: rgba(184,139,158,0.22); color: var(--purple-sleep);">PROPIETARIO SAMSUNG</span>
+          </div>
+
+          <div style="background: rgba(247,242,235,0.04); padding: 10px; border-radius: 12px; display: flex; flex-direction: column; gap: 6px;">
+            <div style="font-family: monospace; font-size: 12px; color: var(--cyan-activity); font-weight: 700;">
+              Char 0xFEA1 • Samsung Pedometer Frame
+            </div>
+            <div id="inspectorHexFEA1" style="font-family: monospace; font-size: 11px; color: var(--mint-steps);">
+              Último HEX: FE A1 BA 1A 00 00
+            </div>
+            <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+              <button class="sim-chip-btn" onclick="injectSteps(125)">Read</button>
+              <button class="sim-chip-btn" style="color: var(--mint-steps);">Notify ON</button>
+              <button class="sim-chip-btn" style="color: var(--orange-calories);">✓ UUID Pasos</button>
+            </div>
+          </div>
+
+          <div style="background: rgba(247,242,235,0.04); padding: 10px; border-radius: 12px; display: flex; flex-direction: column; gap: 6px;">
+            <div style="font-family: monospace; font-size: 12px; color: var(--cyan-activity); font-weight: 700;">
+              Char 0xFEA2 • Samsung Sleep Stages Telemetry
+            </div>
+            <div id="inspectorHexFEA2" style="font-family: monospace; font-size: 11px; color: var(--mint-steps);">
+              Último HEX: FE A2 58 79 60 16
+            </div>
+            <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+              <button class="sim-chip-btn" onclick="injectProprietarySleepPacket()">Read</button>
+              <button class="sim-chip-btn" style="color: var(--mint-steps);">Notify ON</button>
+              <button class="sim-chip-btn" style="color: var(--purple-sleep);">✓ UUID Sueño</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="sh-card">
+          <div>
+            <div style="font-family: monospace; font-weight: 800; font-size: 14px;">Service 0x180D / 0x180F / 0x1814</div>
+            <div style="font-size: 12px; color: var(--text-secondary);">Servicios Estándar Bluetooth SIG</div>
+          </div>
+          <div style="font-family: monospace; font-size: 11px; color: var(--text-secondary);">
+            • 0x2A37 Heart Rate Measurement (Notify ON)<br/>
+            • 0x2A19 Battery Level (86% • Notify ON)<br/>
+            • 0x2A53 RSC Cadence & Speed (Notify ON)
+          </div>
+        </div>
+      </div>
+
+      <!-- Subvista 2: Mapeo y Transmisor Hex -->
+      <div id="ble-sub-2" style="display: none; flex-direction: column; gap: 12px;">
+        <div class="sh-card">
+          <div class="sh-card-title">🎛️ Mapeo Dinámico de UUIDs</div>
+          <div style="font-size: 12px; color: var(--text-secondary);">
+            Define qué característica propietaria del Galaxy Fit 3 alimenta el contador de pasos y sueño en SwiftData:
+          </div>
+          <div>
+            <div style="font-size: 11px; color: var(--mint-steps); margin-bottom: 4px;">UUID Característica de Pasos (UInt32 LE):</div>
+            <input class="ios-input" value="FEA1" />
+          </div>
+          <div>
+            <div style="font-size: 11px; color: var(--purple-sleep); margin-bottom: 4px;">UUID Característica de Sueño:</div>
+            <input class="ios-input" value="FEA2" />
+          </div>
+        </div>
+
+        <div class="sh-card">
+          <div class="sh-card-title">🚀 Inyector de Comandos Hex (TX)</div>
+          <div class="two-col-grid">
+            <div>
+              <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Service UUID</div>
+              <input id="txServiceInput" class="ios-input" value="FD5A" />
+            </div>
+            <div>
+              <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Char UUID</div>
+              <input id="txCharInput" class="ios-input" value="FEA1" />
+            </div>
+          </div>
+          <div>
+            <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Payload Hexadecimal</div>
+            <input id="txHexInput" class="ios-input" value="FE A1 01 00" />
+          </div>
+          <button class="btn-mint" style="background: var(--cyan-activity); color: #12100E;" onclick="sendCustomHexCommand()">
+            ⚡ Enviar Trama Hex a la Pulsera
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom Tab Bar -->
+    <div class="ios-tab-bar">
+      <button id="tabBtn0" class="tab-item active" onclick="switchTab(0)">
+        <span class="tab-icon">🧡</span>
+        <span>Salud</span>
+      </button>
+      <button id="tabBtn1" class="tab-item" onclick="switchTab(1)">
+        <span class="tab-icon">⌚</span>
+        <span>Galaxy Fit 3</span>
+      </button>
+      <button id="tabBtn2" class="tab-item" onclick="switchTab(2)">
+        <span class="tab-icon">📟</span>
+        <span>Sniffer BLE</span>
+      </button>
+    </div>
+
+    <!-- Modal: Payload JSON Exportado -->
+    <div id="jsonModal" class="modal-backdrop" onclick="closeModal('jsonModal')">
+      <div class="modal-sheet" onclick="event.stopPropagation()">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <strong style="font-size: 16px;">Payload JSON para Atajos de iOS</strong>
+          <button class="sim-chip-btn" onclick="closeModal('jsonModal')">Cerrar</button>
+        </div>
+        <pre id="jsonModalContent" class="code-pre"></pre>
+      </div>
+    </div>
+
+    <!-- Modal: Guía de configuración de Atajo -->
+    <div id="guideModal" class="modal-backdrop" onclick="closeModal('guideModal')">
+      <div class="modal-sheet" onclick="event.stopPropagation()">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <strong style="font-size: 16px;">Guía: Puente con Atajos de iOS</strong>
+          <button class="sim-chip-btn" onclick="closeModal('guideModal')">Listo</button>
+        </div>
+        <p style="font-size: 12px; color: var(--text-secondary); line-height: 1.45;">
+          Al instalar el archivo <strong>Fit3Link.ipa</strong> desde Windows con <strong>Sideloadly</strong> usando un Apple ID gratuito, el puente envía un JSON estructurado al portapapeles y ejecuta la app nativa <strong>Atajos</strong> para escribir en Apple Health sin requerir certificados de pago:
+        </p>
+        <div style="font-size: 12px; display: flex; flex-direction: column; gap: 10px;">
+          <div><strong>1.</strong> Crea un Atajo en iOS llamado <code>Fit3 Health Sync</code>.</div>
+          <div><strong>2.</strong> Añade la acción <em>Obtener contenido del portapapeles</em> y <em>Obtener diccionario de la entrada</em>.</div>
+          <div><strong>3.</strong> Lee las claves <code>summaryStepsToday</code>, <code>summaryLatestHeartRateBPM</code> y <code>summaryLatestSpO2Percent</code>.</div>
+          <div><strong>4.</strong> Añade la acción oficial <em>Registrar muestra de Salud</em> de iOS.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ==================== ESTADO REACTIVO DEL SIMULADOR ====================
+    const state = {
+      isMockMode: true,
+      isSnifferPaused: false,
+      isFindBandActive: false,
+      syncMethod: 'shortcuts',
+      packetFilter: 'ALL',
+      steps: 6842,
+      calories: 287.4,
+      distanceMeters: 5063.0,
+      activeMinutes: 54,
+      currentHR: 74,
+      spo2: 98,
+      cadence: 84,
+      speedKmh: 4.8,
+      sleep: { deep: 88, light: 242, rem: 96, awake: 22, score: 87 },
+      hrHistory: [66, 68, 72, 79, 94, 108, 96, 82, 75, 71, 74, 74],
+      packetLogs: []
+    };
+
+    // ==================== NAVEGACIÓN DE PESTAÑAS ====================
+    function switchTab(tabIndex) {
+      const titles = ['Fit3 Link', 'Galaxy Fit 3', 'Diagnóstico BLE'];
+      document.getElementById('navTitle').textContent = titles[tabIndex];
+      for (let i = 0; i < 3; i++) {
+        document.getElementById(`tab-${i}`).style.display = (i === tabIndex) ? 'flex' : 'none';
+        document.getElementById(`tabBtn${i}`).classList.toggle('active', i === tabIndex);
+      }
+    }
+
+    function switchBleSubtab(subIndex) {
+      for (let i = 0; i < 3; i++) {
+        document.getElementById(`ble-sub-${i}`).style.display = (i === subIndex) ? 'flex' : 'none';
+        document.getElementById(`segBle${i}`).classList.toggle('active', i === subIndex);
+      }
+    }
+
+    // ==================== RENDERIZADO DE ANILLOS Y MÉTRICAS ====================
+    function updateDashboardUI() {
+      document.getElementById('valSteps').textContent = state.steps.toLocaleString('en-US');
+      document.getElementById('valCalories').textContent = Math.round(state.calories);
+      document.getElementById('valActiveMins').textContent = state.activeMinutes;
+      document.getElementById('dashDistanceKm').textContent = (state.distanceMeters / 1000).toFixed(2) + ' km';
+      document.getElementById('valHeartRate').textContent = state.currentHR;
+      document.getElementById('valSpO2').textContent = state.spo2;
+      document.getElementById('valCadence').textContent = state.cadence;
+      document.getElementById('valSpeedKmh').textContent = `GATT 0x1814 • ${state.speedKmh.toFixed(1)} km/h`;
+
+      // Actualizar anillos SVG
+      const stepCircumference = 339.29;
+      const calCircumference = 245.04;
+      const actCircumference = 150.79;
+
+      const stepProg = Math.min(state.steps / 10000, 1);
+      const calProg = Math.min(state.calories / 400, 1);
+      const actProg = Math.min(state.activeMinutes / 60, 1);
+
+      document.getElementById('ringSteps').style.strokeDashoffset = stepCircumference * (1 - stepProg);
+      document.getElementById('ringCalories').style.strokeDashoffset = calCircumference * (1 - calProg);
+      document.getElementById('ringActive').style.strokeDashoffset = actCircumference * (1 - actProg);
+
+      // Sueño
+      const totalSleep = state.sleep.deep + state.sleep.light + state.sleep.rem;
+      const totalBed = totalSleep + state.sleep.awake;
+      document.getElementById('valSleepTotal').textContent = `${Math.floor(totalSleep / 60)}h ${String(totalSleep % 60).padStart(2, '0')}m`;
+      document.getElementById('valSleepScore').textContent = `Puntuación ${state.sleep.score}`;
+      document.getElementById('barDeep').style.width = `${(state.sleep.deep / totalBed) * 100}%`;
+      document.getElementById('barLight').style.width = `${(state.sleep.light / totalBed) * 100}%`;
+      document.getElementById('barRem').style.width = `${(state.sleep.rem / totalBed) * 100}%`;
+      document.getElementById('barAwake').style.width = `${(state.sleep.awake / totalBed) * 100}%`;
+
+      document.getElementById('txtDeep').textContent = `${Math.floor(state.sleep.deep / 60)}h ${state.sleep.deep % 60}m`;
+      document.getElementById('txtLight').textContent = `${Math.floor(state.sleep.light / 60)}h ${String(state.sleep.light % 60).padStart(2, '0')}m`;
+      document.getElementById('txtRem').textContent = `${Math.floor(state.sleep.rem / 60)}h ${state.sleep.rem % 60}m`;
+      document.getElementById('txtAwake').textContent = `0h ${state.sleep.awake}m`;
+
+      renderHeartRateChart();
+    }
+
+    // ==================== GRÁFICA DE FRECUENCIA CARDÍACA SVG ====================
+    function renderHeartRateChart() {
+      const svg = document.getElementById('hrChartSvg');
+      const samples = state.hrHistory.slice(-14);
+      const minVal = Math.min(...samples);
+      const maxVal = Math.max(...samples);
+      document.getElementById('hrMinText').textContent = `Mín: ${minVal} BPM`;
+      document.getElementById('hrMaxText').textContent = `Máx: ${maxVal} BPM`;
+
+      const width = 340;
+      const height = 140;
+      const padY = 18;
+      const lowBound = Math.max(45, minVal - 10);
+      const highBound = Math.min(200, maxVal + 12);
+
+      const points = samples.map((bpm, idx) => {
+        const x = (idx / Math.max(samples.length - 1, 1)) * (width - 16) + 8;
+        const norm = (bpm - lowBound) / Math.max(highBound - lowBound, 1);
+        const y = height - padY - norm * (height - padY * 2);
+        return { x, y, bpm };
+      });
+
+      let pathD = `M ${points[0].x} ${points[0].y}`;
+      for (let i = 0; i < points.length - 1; i++) {
+        const xc = (points[i].x + points[i + 1].x) / 2;
+        const yc = (points[i].y + points[i + 1].y) / 2;
+        pathD += ` Q ${points[i].x} ${points[i].y}, ${xc} ${yc}`;
+      }
+      const lastPt = points[points.length - 1];
+      pathD += ` T ${lastPt.x} ${lastPt.y}`;
+
+      const areaD = `${pathD} L ${lastPt.x} ${height} L ${points[0].x} ${height} Z`;
+
+      const circlesHtml = points.map(p =>
+        `<circle cx="${p.x}" cy="${p.y}" r="3.6" fill="#D95F5B" stroke="#1E1A17" stroke-width="1.5">
+           <title>${p.bpm} BPM</title>
+         </circle>`
+      ).join('');
+
+      svg.innerHTML = `
+        <defs>
+          <linearGradient id="hrGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#D95F5B" stop-opacity="0.38"/>
+            <stop offset="100%" stop-color="#D95F5B" stop-opacity="0.01"/>
+          </linearGradient>
+        </defs>
+        <path d="${areaD}" fill="url(#hrGrad)" />
+        <path d="${pathD}" fill="none" stroke="#D95F5B" stroke-width="2.6" stroke-linecap="round" />
+        ${circlesHtml}
+      `;
+    }
+
+    // ==================== MOTOR BLE SNIFFER & PAQUETES HEX ====================
+    function bytesToHex(bytes) {
+      return bytes.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+    }
+
+    function bytesToUTF8Preview(bytes) {
+      return bytes.map(b => (b >= 32 && b <= 126) ? String.fromCharCode(b) : '.').join('');
+    }
+
+    function decodeLittleEndianSummary(bytes) {
+      if (!bytes.length) return 'Vacío';
+      const parts = [`u8[0]=${bytes[0]}`];
+      if (bytes.length >= 2) {
+        const u16_0 = bytes[0] | (bytes[1] << 8);
+        parts.push(`u16LE[0]=${u16_0}`);
+      }
+      if (bytes.length >= 4) {
+        const u16_2 = bytes[2] | (bytes[3] << 8);
+        const u32_0 = (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
+        parts.push(`u16LE[2]=${u16_2}`);
+        parts.push(`u32LE[0]=${u32_0}`);
+      }
+      return parts.join(' | ');
+    }
+
+    function pushPacketLog({ dir = 'RX', service = 'FD5A', char = 'FEA1', bytes = [], tag = 'STEPS', tagLabel = 'Candidato Pasos', note = '' }) {
+      if (state.isSnifferPaused) return;
+      const now = new Date();
+      const timeStr = now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
+      const hex = bytesToHex(bytes);
+      const utf8 = bytesToUTF8Preview(bytes);
+      const decoded = decodeLittleEndianSummary(bytes);
+
+      state.packetLogs.unshift({
+        timeStr, dir, service, char, hex, utf8, decoded, tag, tagLabel, note
+      });
+
+      if (state.packetLogs.length > 60) state.packetLogs.pop();
+      document.getElementById('pktCount').textContent = state.packetLogs.length;
+
+      if (char === 'FEA1') {
+        const el = document.getElementById('inspectorHexFEA1');
+        if (el) el.textContent = `Último HEX: ${hex}`;
+      } else if (char === 'FEA2') {
+        const el = document.getElementById('inspectorHexFEA2');
+        if (el) el.textContent = `Último HEX: ${hex}`;
+      }
+
+      renderPacketLogs();
+    }
+
+    function renderPacketLogs() {
+      const container = document.getElementById('packetLogsContainer');
+      const query = (document.getElementById('snifferSearchInput')?.value || '').trim().toUpperCase();
+
+      const filtered = state.packetLogs.filter(item => {
+        const matchTag = state.packetFilter === 'ALL' || item.tag === state.packetFilter;
+        const matchQuery = !query || item.char.includes(query) || item.service.includes(query) || item.hex.includes(query);
+        return matchTag && matchQuery;
+      });
+
+      container.innerHTML = filtered.map(item => `
+        <div class="packet-card">
+          <div class="packet-top">
+            <span class="dir-badge ${item.dir}">${item.dir}</span>
+            <strong>Svc: ${item.service} • Char: ${item.char}</strong>
+            <span style="margin-left: auto; color: var(--text-secondary);">${item.timeStr}</span>
+          </div>
+          <div class="hex-line"><span>HEX:</span>${item.hex}</div>
+          <div class="decode-line">
+            <span>UTF8: "${item.utf8}"</span>
+            <span class="decode-le">${item.decoded}</span>
+          </div>
+          <div style="font-size: 10px; color: var(--purple-sleep);">
+            [${item.tagLabel}] <span style="color: var(--text-secondary);">${item.note}</span>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    // ==================== ACCIONES INTERACTIVAS Y BOTONES ====================
+    function injectSteps(amount) {
+      state.steps += amount;
+      state.calories = +(state.steps * 0.042).toFixed(1);
+      state.distanceMeters = +(state.steps * 0.74).toFixed(1);
+      state.activeMinutes = Math.min(120, Math.floor(state.steps / 125));
+
+      const s = state.steps >>> 0;
+      const bytes = [0xFE, 0xA1, s & 0xFF, (s >> 8) & 0xFF, (s >> 16) & 0xFF, (s >> 24) & 0xFF];
+      pushPacketLog({
+        dir: 'RX',
+        service: 'FD5A',
+        char: 'FEA1',
+        bytes,
+        tag: 'STEPS',
+        tagLabel: 'Candidato Pasos',
+        note: `Pasos decodificados: ${state.steps.toLocaleString()}`
+      });
+
+      updateDashboardUI();
+      showToast(`+${amount} pasos recibidos desde Galaxy Fit 3 (Total: ${state.steps.toLocaleString()})`);
+    }
+
+    function injectHeartRateSpike() {
+      const spikeBPM = Math.floor(Math.random() * 14) + 112;
+      state.currentHR = spikeBPM;
+      state.hrHistory.push(spikeBPM);
+      const rr = Math.round((60 / spikeBPM) * 1024);
+      const bytes = [0x16, spikeBPM, rr & 0xFF, (rr >> 8) & 0xFF];
+
+      pushPacketLog({
+        dir: 'RX',
+        service: '180D',
+        char: '2A37',
+        bytes,
+        tag: 'HR',
+        tagLabel: 'Heart Rate (0x180D)',
+        note: `Pulso en vivo: ${spikeBPM} BPM`
+      });
+
+      updateDashboardUI();
+      showToast(`❤️ Frecuencia cardíaca actualizada: ${spikeBPM} BPM`);
+    }
+
+    function injectProprietarySleepPacket() {
+      state.sleep.deep = 94;
+      state.sleep.light = 248;
+      state.sleep.rem = 102;
+      state.sleep.awake = 18;
+      state.sleep.score = 91;
+
+      const bytes = [0xFE, 0xA2, state.sleep.deep, Math.floor(state.sleep.light / 2), state.sleep.rem, state.sleep.awake];
+      pushPacketLog({
+        dir: 'RX',
+        service: 'FD5A',
+        char: 'FEA2',
+        bytes,
+        tag: 'SLEEP',
+        tagLabel: 'Candidato Sueño',
+        note: `Sueño RX: Prof ${state.sleep.deep}m / Lig ${state.sleep.light}m / REM ${state.sleep.rem}m`
+      });
+
+      updateDashboardUI();
+      showToast('🌙 Trama de fases de sueño recibida y guardada en SwiftData');
+    }
+
+    function triggerFindBand() {
+      state.isFindBandActive = !state.isFindBandActive;
+      const btn = document.getElementById('btnFindMyBand');
+      const title = document.getElementById('findBandTitle');
+      const avatar1 = document.getElementById('watchAvatarDash');
+      const avatar2 = document.getElementById('watchAvatarDev');
+      const island = document.getElementById('dynamicIsland');
+      const islandText = document.getElementById('islandText');
+
+      btn.classList.toggle('active', state.isFindBandActive);
+      avatar1.classList.toggle('vibrating', state.isFindBandActive);
+      avatar2.classList.toggle('vibrating', state.isFindBandActive);
+      island.classList.toggle('active-alert', state.isFindBandActive);
+
+      const alertByte = state.isFindBandActive ? 0x02 : 0x00;
+      pushPacketLog({
+        dir: 'TX',
+        service: '1802',
+        char: '2A06',
+        bytes: [alertByte],
+        tag: 'TX',
+        tagLabel: 'Comando TX',
+        note: state.isFindBandActive ? 'Encontrar mi pulsera: High Alert (0x02)' : 'Detener alerta (0x00)'
+      });
+
+      if (state.isFindBandActive) {
+        title.textContent = 'Detener Alerta en Pulsera (Vibrando...)';
+        islandText.textContent = '🔔 VIBRANDO FIT3';
+        islandText.style.color = '#D95F5B';
+        showToast('🔔 Haciendo vibrar Samsung Galaxy Fit 3 (GATT 0x1802 -> 0x02)');
+      } else {
+        title.textContent = 'Encontrar mi pulsera (Alerta BLE)';
+        islandText.textContent = 'FIT3 BLE';
+        islandText.style.color = '#E59A52';
+        showToast('Alerta de búsqueda detenida.');
+      }
+    }
+
+    function toggleMockMode() {
+      state.isMockMode = !state.isMockMode;
+      const topBtn = document.getElementById('mockToggleBtn');
+      const topTxt = document.getElementById('mockToggleText');
+      const devSwitch = document.getElementById('switchMockDev');
+      const subtitle = document.getElementById('dashConnSubtitle');
+
+      topBtn.className = 'mock-pill-toggle ' + (state.isMockMode ? 'on' : 'off');
+      topTxt.textContent = state.isMockMode ? 'Simulación ON' : 'BLE Real';
+      devSwitch.classList.toggle('on', state.isMockMode);
+      subtitle.textContent = state.isMockMode
+        ? 'Modo Simulación Activo • SM-R390'
+        : 'Escaneando hardware BLE físico...';
+
+      showToast(state.isMockMode
+        ? '🧪 Modo Simulación activado: inyectando telemetría de Galaxy Fit 3'
+        : '📡 Modo BLE Real activado');
+    }
+
+    function buildShortcutsJSONPayload() {
+      return JSON.stringify({
+        schemaVersion: "1.0",
+        exportedAtISO8601: new Date().toISOString(),
+        deviceName: "Galaxy Fit3 (F9A2)",
+        deviceModel: "SM-R390",
+        summaryStepsToday: state.steps,
+        summaryLatestHeartRateBPM: state.currentHR,
+        summaryLatestSpO2Percent: state.spo2,
+        summaryLastSleepMinutes: state.sleep.deep + state.sleep.light + state.sleep.rem,
+        sleepBreakdown: state.sleep
+      }, null, 2);
+    }
+
+    function syncWithAppleHealthShortcut() {
+      const json = buildShortcutsJSONPayload();
+      navigator.clipboard?.writeText(json).catch(() => {});
+      const shortcutName = document.getElementById('shortcutNameInput')?.value || 'Fit3 Health Sync';
+      const msg = `✅ JSON copiado al portapapeles (${state.steps.toLocaleString()} pasos, ${state.currentHR} BPM) y Atajo '${shortcutName}' invocado.`;
+      document.getElementById('dashSyncStatus').textContent = msg;
+      document.getElementById('devSyncStatus').textContent = msg;
+      showToast(msg);
+    }
+
+    function copyHealthJSON() {
+      const json = buildShortcutsJSONPayload();
+      navigator.clipboard?.writeText(json).catch(() => {});
+      showToast('📋 Payload JSON copiado al portapapeles');
+    }
+
+    function showHealthJSONModal() {
+      document.getElementById('jsonModalContent').textContent = buildShortcutsJSONPayload();
+      openModal('jsonModal');
+    }
+
+    function setSyncMethod(method) {
+      state.syncMethod = method;
+      document.getElementById('segSyncShortcuts').classList.toggle('active', method === 'shortcuts');
+      document.getElementById('segSyncHK').classList.toggle('active', method === 'healthkit');
+      showToast(method === 'shortcuts'
+        ? 'Modo Puente Atajos de iOS seleccionado (100% compatible con Sideloadly gratuito)'
+        : 'Modo HealthKit Directo seleccionado (con fallback seguro si falta entitlement)');
+    }
+
+    function simulateANCSBonding() {
+      showToast('🛡️ Diálogo de enlace seguro Bluetooth iOS completado: ANCS y AMS activos');
+    }
+
+    function simulateBLEScan() {
+      showToast('📡 Escáner BLE: Galaxy Fit3 (F9A2) detectada (-49 dBm)');
+    }
+
+    function populateDemoHistory() {
+      state.hrHistory = [64, 67, 71, 84, 102, 119, 110, 95, 86, 78, 73, 76, 74];
+      injectSteps(650);
+      showToast('✨ Historial demo regenerado en SwiftData');
+    }
+
+    function setPacketFilter(tag, btnEl) {
+      state.packetFilter = tag;
+      document.querySelectorAll('.tag-chip').forEach(b => b.classList.remove('active'));
+      btnEl.classList.add('active');
+      renderPacketLogs();
+    }
+
+    function togglePauseSniffer() {
+      state.isSnifferPaused = !state.isSnifferPaused;
+      document.getElementById('btnPauseSniffer').textContent = state.isSnifferPaused ? '▶ Reanudar' : '⏸ Pausar';
+      showToast(state.isSnifferPaused ? 'Sniffer BLE en pausa' : 'Sniffer BLE reanudado');
+    }
+
+    function clearSnifferLogs() {
+      state.packetLogs = [];
+      document.getElementById('pktCount').textContent = '0';
+      renderPacketLogs();
+    }
+
+    function sendCustomHexCommand() {
+      const svc = (document.getElementById('txServiceInput').value || 'FD5A').trim().toUpperCase();
+      const chr = (document.getElementById('txCharInput').value || 'FEA1').trim().toUpperCase();
+      const rawHex = (document.getElementById('txHexInput').value || 'FE A1 01 00').replace(/[^0-9A-Fa-f]/g, '');
+
+      if (!rawHex || rawHex.length % 2 !== 0) {
+        showToast('⚠️ Formato Hex inválido. Introduce pares de caracteres hexadecimales.');
+        return;
+      }
+
+      const bytes = [];
+      for (let i = 0; i < rawHex.length; i += 2) {
+        bytes.push(parseInt(rawHex.substring(i, i + 2), 16));
+      }
+
+      pushPacketLog({
+        dir: 'TX',
+        service: svc,
+        char: chr,
+        bytes,
+        tag: 'TX',
+        tagLabel: 'Comando TX',
+        note: `Envío manual Hex (${bytes.length} bytes)`
+      });
+
+      switchBleSubtab(0);
+      showToast(`🚀 Enviados ${bytes.length} bytes a ${svc}:${chr}`);
+    }
+
+    function openModal(id) {
+      document.getElementById(id).classList.add('open');
+    }
+
+    function closeModal(id) {
+      document.getElementById(id).classList.remove('open');
+    }
+
+    let toastTimer = null;
+    function showToast(text) {
+      const toast = document.getElementById('iosToast');
+      toast.textContent = text;
+      toast.classList.add('visible');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => {
+        toast.classList.remove('visible');
+      }, 2800);
+    }
+
+    // ==================== LOOP DE TELEMETRÍA EN TIEMPO REAL ====================
+    setInterval(() => {
+      if (!state.isMockMode) return;
+
+      // Simular variación de pulso
+      const delta = Math.floor(Math.random() * 7) - 3;
+      state.currentHR = Math.min(126, Math.max(62, state.currentHR + delta));
+      state.hrHistory.push(state.currentHR);
+      if (state.hrHistory.length > 20) state.hrHistory.shift();
+
+      const rr = Math.round((60 / state.currentHR) * 1024);
+      pushPacketLog({
+        dir: 'RX',
+        service: '180D',
+        char: '2A37',
+        bytes: [0x16, state.currentHR, rr & 0xFF, (rr >> 8) & 0xFF],
+        tag: 'HR',
+        tagLabel: 'Heart Rate (0x180D)',
+        note: `Pulso: ${state.currentHR} BPM`
+      });
+
+      // Simular pasos incrementales
+      const addSteps = Math.floor(Math.random() * 14) + 3;
+      state.steps += addSteps;
+      state.calories = +(state.steps * 0.042).toFixed(1);
+      state.distanceMeters = +(state.steps * 0.74).toFixed(1);
+
+      const s = state.steps >>> 0;
+      pushPacketLog({
+        dir: 'RX',
+        service: 'FD5A',
+        char: 'FEA1',
+        bytes: [0xFE, 0xA1, s & 0xFF, (s >> 8) & 0xFF, (s >> 16) & 0xFF, (s >> 24) & 0xFF],
+        tag: 'STEPS',
+        tagLabel: 'Candidato Pasos',
+        note: `Pasos decodificados: ${state.steps.toLocaleString()}`
+      });
+
+      updateDashboardUI();
+    }, 3200);
+
+    // Inicializar vista al cargar
+    updateDashboardUI();
+    injectSteps(0);
+  </script>
+</body>
+</html>

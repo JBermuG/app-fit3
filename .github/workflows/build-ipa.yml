@@ -1,0 +1,77 @@
+name: Build Unsigned Fit3Link IPA (Sideloadly Ready)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    name: Compile & Package Fit3Link.ipa
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Select Latest Stable Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen &> /dev/null; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: Generate Xcode Project via XcodeGen
+        run: |
+          xcodegen generate
+          ls -la Fit3Link.xcodeproj
+
+      - name: Build Unsigned Release App for iOS Device
+        run: |
+          xcodebuild clean build \
+            -project Fit3Link.xcodeproj \
+            -scheme Fit3Link \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "${RUNNER_TEMP}/DerivedData" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            AD_HOC_CODE_SIGNING_ALLOWED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO
+
+      - name: Package Payload into Fit3Link.ipa
+        run: |
+          APP_PATH=$(find "${RUNNER_TEMP}/DerivedData" -name "Fit3Link.app" -type d | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ Error: No se encontró Fit3Link.app en DerivedData"
+            exit 1
+          fi
+          echo "✅ App encontrada en: $APP_PATH"
+
+          # Verificar que UIRequiredDeviceCapabilities no contenga healthkit
+          /usr/libexec/PlistBuddy -c "Print :UIRequiredDeviceCapabilities" "$APP_PATH/Info.plist" || true
+
+          rm -rf Payload Fit3Link.ipa
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/Fit3Link.app
+          zip -r9 Fit3Link.ipa Payload
+          ls -lh Fit3Link.ipa
+
+      - name: Upload Fit3Link.ipa Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Fit3Link.ipa
+          path: Fit3Link.ipa
+          if-no-files-found: error
+          retention-days: 30

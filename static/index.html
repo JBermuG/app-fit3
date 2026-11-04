@@ -1,0 +1,1232 @@
+<!DOCTYPE html>
+<html lang="es" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Fit3 Mac Studio - Galaxy Fit 3 (SM-R390)</title>
+  
+  <!-- PWA Meta Tags para iPhone Safari -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Fit3 Bridge" />
+  <meta name="theme-color" content="#12100E" />
+
+  <!-- TailwindCSS & Chart.js & QRCode CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            appBg: '#12100E',
+            appCard: '#1E1A17',
+            appCardElevated: '#28221D',
+            appBorder: 'rgba(245, 232, 214, 0.08)',
+            appText: '#F7F2EB',
+            appMuted: '#A89F94',
+            fitAmber: '#E59A52',      // Ámbar dorado (Pasos / Acento)
+            fitSage: '#8AB082',       // Verde Salvia (Actividad)
+            fitCoral: '#D95F5B',      // Coral Arcilla (Pulsaciones)
+            fitTerracotta: '#D96B43', // Terracota Cobre (Calorías)
+            fitMauve: '#B88B9E',      // Malva Cálido (Sueño Ligero)
+            fitPlum: '#8C6278',       // Ciruela Cálido (Sueño Profundo)
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    body {
+      background-color: #12100E;
+      color: #F7F2EB;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .custom-scrollbar::-webkit-scrollbar {
+      width: 4px;
+      height: 4px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb {
+      background: rgba(245, 232, 214, 0.15);
+      border-radius: 999px;
+    }
+    @keyframes pulseSoft {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.05); opacity: 0.85; }
+    }
+    .pulse-watch {
+      animation: pulseSoft 2s infinite ease-in-out;
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col justify-between selection:bg-fitAmber selection:text-black">
+
+  <!-- Header Superior -->
+  <header class="sticky top-0 z-40 bg-appBg/90 backdrop-blur-md border-b border-appBorder px-4 py-3 sm:px-6">
+    <div class="max-w-6xl mx-auto flex items-center justify-between gap-4">
+      
+      <div class="flex items-center gap-3">
+        <div class="w-9 h-9 rounded-xl bg-fitAmber/20 border border-fitAmber/40 flex items-center justify-center text-fitAmber text-lg shadow-sm">
+          ⌚
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <h1 class="font-extrabold text-base sm:text-lg tracking-tight text-appText">Fit3 Mac Studio</h1>
+            <span id="connBadge" class="text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-appCardElevated text-appMuted border border-appBorder">
+              Desconectado
+            </span>
+          </div>
+          <p id="subStatusText" class="text-xs text-appMuted truncate max-w-[240px] sm:max-w-md">
+            Recolección y Visualización de Métricas BLE en macOS
+          </p>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <!-- Indicador de Batería -->
+        <div id="batteryPill" class="hidden sm:flex items-center gap-1.5 px-3 py-1 rounded-full bg-appCard border border-appBorder text-xs font-semibold">
+          <span class="text-fitAmber">🔋</span>
+          <span id="headerBatteryVal">--%</span>
+        </div>
+
+        <!-- Botón Modo Simulación -->
+        <button id="btnMockToggle" onclick="toggleMockMode()" class="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-fitAmber/30 bg-fitAmber/10 text-fitAmber hover:bg-fitAmber/20 text-xs font-bold transition-all">
+          <span class="w-2 h-2 rounded-full bg-fitAmber inline-block"></span>
+          <span id="mockBtnText">Simulación OFF</span>
+        </button>
+      </div>
+
+    </div>
+  </header>
+
+  <!-- Contenedor Principal con Tabs -->
+  <main class="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6 space-y-6">
+
+    <!-- Navegación de Pestañas estilo macOS -->
+    <nav class="flex p-1 bg-appCard border border-appBorder rounded-2xl max-w-lg mx-auto shadow-inner">
+      <button onclick="switchTab('dashboard')" id="tabNav-dashboard" class="flex-1 py-2 rounded-xl text-xs sm:text-sm font-bold text-black bg-fitAmber shadow-md transition-all">
+        💚 Métricas en Vivo
+      </button>
+      <button onclick="switchTab('sniffer')" id="tabNav-sniffer" class="flex-1 py-2 rounded-xl text-xs sm:text-sm font-bold text-appMuted hover:text-appText transition-all">
+        📟 Sniffer & Control BLE
+      </button>
+      <button onclick="switchTab('data')" id="tabNav-data" class="flex-1 py-2 rounded-xl text-xs sm:text-sm font-bold text-appMuted hover:text-appText transition-all">
+        💾 Datos en Mac (SQLite)
+      </button>
+    </nav>
+
+    <!-- ==================== PESTAÑA 1: DASHBOARD DE SALUD ==================== -->
+    <section id="tabContent-dashboard" class="space-y-6">
+
+      <!-- Fila 1: Banner de Conexión y Dispositivo -->
+      <div class="bg-appCard border border-appBorder rounded-3xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm">
+        <div class="flex items-center gap-4">
+          <div id="deviceAvatar" class="w-14 h-14 rounded-2xl bg-fitAmber/15 border border-fitAmber/30 flex items-center justify-center text-2xl text-fitAmber">
+            ⌚
+          </div>
+          <div>
+            <div class="flex items-center gap-2">
+              <h2 id="cardDeviceName" class="font-extrabold text-lg text-appText">Galaxy Fit3 (78DC)</h2>
+              <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-fitSage/20 text-fitSage border border-fitSage/30">SM-R390</span>
+            </div>
+            <p id="cardDeviceAddress" class="text-xs text-appMuted font-mono">Bluetooth Low Energy • CoreBluetooth</p>
+            <p id="cardDeviceStatusMsg" class="text-xs text-fitAmber mt-0.5 font-medium">Modo Simulación activo para pruebas</p>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-3 self-end sm:self-center">
+          <button onclick="switchTab('sniffer')" class="px-4 py-2 rounded-xl bg-appCardElevated border border-appBorder text-xs font-semibold text-appText hover:border-fitAmber/40 transition-all">
+            Inspeccionar UUIDs
+          </button>
+          <button id="btnQuickConnect" onclick="handleQuickConnect()" class="px-4 py-2 rounded-xl bg-fitAmber text-black text-xs font-bold hover:brightness-105 transition-all">
+            Conectar Reloj
+          </button>
+        </div>
+      </div>
+
+      <!-- Fila 2: Anillos de Actividad Diaria & Tarjetas -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+        <!-- Tarjeta de Anillos Concéntricos (Samsung Health / Apple Fitness) -->
+        <div class="lg:col-span-1 bg-appCard border border-appBorder rounded-3xl p-6 flex flex-col justify-between shadow-sm">
+          <div class="flex items-center justify-between">
+            <span class="font-bold text-sm text-appText flex items-center gap-2">
+              <span class="text-fitTerracotta">🔥</span> Actividad Diaria
+            </span>
+            <span id="distanceKmBadge" class="text-xs font-bold text-fitAmber">5.06 km</span>
+          </div>
+
+          <div class="flex items-center justify-center my-4 relative">
+            <svg class="w-44 h-44 -rotate-90" viewBox="0 0 140 140">
+              <!-- Anillo 1: Pasos (r=56, C=351.86) -->
+              <circle cx="70" cy="70" r="56" stroke="rgba(229,154,82,0.15)" stroke-width="12" fill="none" />
+              <circle id="ringStepsSvg" cx="70" cy="70" r="56" stroke="#E59A52" stroke-width="12" fill="none"
+                      stroke-linecap="round" stroke-dasharray="351.86" stroke-dashoffset="110" class="transition-all duration-700" />
+
+              <!-- Anillo 2: Calorías (r=41, C=257.61) -->
+              <circle cx="70" cy="70" r="41" stroke="rgba(217,107,67,0.15)" stroke-width="12" fill="none" />
+              <circle id="ringCaloriesSvg" cx="70" cy="70" r="41" stroke="#D96B43" stroke-width="12" fill="none"
+                      stroke-linecap="round" stroke-dasharray="257.61" stroke-dashoffset="75" class="transition-all duration-700" />
+
+              <!-- Anillo 3: Tiempo Activo (r=26, C=163.36) -->
+              <circle cx="70" cy="70" r="26" stroke="rgba(138,176,130,0.15)" stroke-width="12" fill="none" />
+              <circle id="ringActiveSvg" cx="70" cy="70" r="26" stroke="#8AB082" stroke-width="12" fill="none"
+                      stroke-linecap="round" stroke-dasharray="163.36" stroke-dashoffset="30" class="transition-all duration-700" />
+            </svg>
+            <div class="absolute text-2xl">🚶</div>
+          </div>
+
+          <div class="space-y-3 pt-2 border-t border-appBorder">
+            <div class="flex justify-between items-center text-xs">
+              <span class="flex items-center gap-1.5 text-appMuted">
+                <span class="w-2.5 h-2.5 rounded-full bg-fitAmber inline-block"></span> Pasos
+              </span>
+              <span class="font-extrabold text-sm"><span id="valSteps" class="text-appText">6,842</span> <span class="text-appMuted text-[10px]">/ 10,000</span></span>
+            </div>
+            <div class="flex justify-between items-center text-xs">
+              <span class="flex items-center gap-1.5 text-appMuted">
+                <span class="w-2.5 h-2.5 rounded-full bg-fitTerracotta inline-block"></span> Calorías activas
+              </span>
+              <span class="font-extrabold text-sm"><span id="valCalories" class="text-appText">287</span> <span class="text-appMuted text-[10px]">/ 400 kcal</span></span>
+            </div>
+            <div class="flex justify-between items-center text-xs">
+              <span class="flex items-center gap-1.5 text-appMuted">
+                <span class="w-2.5 h-2.5 rounded-full bg-fitSage inline-block"></span> Tiempo activo
+              </span>
+              <span class="font-extrabold text-sm"><span id="valActiveMins" class="text-appText">54</span> <span class="text-appMuted text-[10px]">/ 60 min</span></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Frecuencia Cardíaca con Chart.js en Vivo -->
+        <div class="lg:col-span-2 bg-appCard border border-appBorder rounded-3xl p-6 flex flex-col justify-between shadow-sm">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <span class="text-fitCoral">❤️</span>
+              <h3 class="font-bold text-sm text-appText">Frecuencia Cardíaca en Tiempo Real</h3>
+            </div>
+            <div class="flex items-baseline gap-1">
+              <span id="valHeartRateBpm" class="text-3xl font-black text-fitCoral">74</span>
+              <span class="text-xs font-bold text-appMuted">BPM</span>
+            </div>
+          </div>
+
+          <!-- Contenedor del Canvas de Chart.js -->
+          <div class="relative h-44 w-full my-2">
+            <canvas id="hrChartCanvas"></canvas>
+          </div>
+
+          <div class="flex items-center justify-between text-xs text-appMuted pt-2 border-t border-appBorder">
+            <span id="valHeartRateAvg">Promedio hoy: 72 BPM</span>
+            <span class="font-mono text-[10px] text-appMuted">Servicio GATT 0x180D (0x2A37)</span>
+            <span class="text-fitCoral font-semibold">Sensor Activo</span>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Fila 3: Fases de Sueño & SpO2 -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+
+        <!-- SpO2 & Batería -->
+        <div class="md:col-span-1 space-y-6">
+          <div class="bg-appCard border border-appBorder rounded-3xl p-5 shadow-sm">
+            <div class="flex items-center justify-between">
+              <span class="text-xs text-appMuted font-bold uppercase tracking-wider flex items-center gap-1.5">
+                <span>🫁</span> Oxígeno (SpO2)
+              </span>
+              <span class="text-[10px] font-bold text-fitSage bg-fitSage/15 px-2 py-0.5 rounded-full">Normal</span>
+            </div>
+            <div class="mt-3 flex items-baseline gap-2">
+              <span id="valSpO2" class="text-3xl font-black text-fitSage">98</span>
+              <span class="text-sm font-bold text-appMuted">%</span>
+            </div>
+            <p class="text-xs text-appMuted mt-1">Saturación en reposo óptima</p>
+          </div>
+
+          <div class="bg-appCard border border-appBorder rounded-3xl p-5 shadow-sm">
+            <div class="flex items-center justify-between">
+              <span class="text-xs text-appMuted font-bold uppercase tracking-wider flex items-center gap-1.5">
+                <span>🔋</span> Batería del Reloj
+              </span>
+              <span id="valBatteryLevel" class="text-xl font-bold text-fitAmber">86%</span>
+            </div>
+            <div class="w-full bg-appCardElevated h-2.5 rounded-full overflow-hidden mt-3">
+              <div id="barBattery" class="bg-fitAmber h-full rounded-full transition-all duration-500" style="width: 86%;"></div>
+            </div>
+            <p class="text-xs text-appMuted mt-2">GATT Service 0x180F (0x2A19)</p>
+          </div>
+        </div>
+
+        <!-- Fases de Sueño -->
+        <div class="md:col-span-2 bg-appCard border border-appBorder rounded-3xl p-6 flex flex-col justify-between shadow-sm">
+          <div class="flex items-center justify-between">
+            <span class="font-bold text-sm text-appText flex items-center gap-2">
+              <span class="text-fitMauve">🌙</span> Registro de Sueño
+            </span>
+            <span id="valSleepScore" class="text-xs font-bold px-3 py-1 rounded-full bg-fitMauve/20 text-fitMauve border border-fitMauve/30">
+              Puntuación 87
+            </span>
+          </div>
+
+          <div class="my-4">
+            <div class="flex items-baseline gap-2 mb-2">
+              <span id="valSleepTotalTime" class="text-2xl font-black text-appText">7h 06m</span>
+              <span class="text-xs text-appMuted">tiempo total dormido</span>
+            </div>
+
+            <!-- Barra Segmentada de Fases -->
+            <div class="w-full h-4 rounded-lg overflow-hidden flex gap-0.5 bg-appCardElevated">
+              <div id="barSleepDeep" class="bg-fitPlum h-full transition-all duration-500" style="width: 20%;" title="Profundo"></div>
+              <div id="barSleepLight" class="bg-fitMauve h-full transition-all duration-500" style="width: 55%;" title="Ligero"></div>
+              <div id="barSleepRem" class="bg-fitSage h-full transition-all duration-500" style="width: 20%;" title="REM"></div>
+              <div id="barSleepAwake" class="bg-fitCoral h-full transition-all duration-500" style="width: 5%;" title="Despierto"></div>
+            </div>
+          </div>
+
+          <!-- Leyenda de Fases -->
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-3 border-t border-appBorder text-xs">
+            <div class="bg-appCardElevated p-2.5 rounded-xl border border-appBorder">
+              <div class="text-appMuted flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-fitPlum"></span> Profundo</div>
+              <div id="txtSleepDeep" class="font-bold text-appText mt-1">1h 28m</div>
+            </div>
+            <div class="bg-appCardElevated p-2.5 rounded-xl border border-appBorder">
+              <div class="text-appMuted flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-fitMauve"></span> Ligero</div>
+              <div id="txtSleepLight" class="font-bold text-appText mt-1">4h 02m</div>
+            </div>
+            <div class="bg-appCardElevated p-2.5 rounded-xl border border-appBorder">
+              <div class="text-appMuted flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-fitSage"></span> REM</div>
+              <div id="txtSleepRem" class="font-bold text-appText mt-1">1h 36m</div>
+            </div>
+            <div class="bg-appCardElevated p-2.5 rounded-xl border border-appBorder">
+              <div class="text-appMuted flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-fitCoral"></span> Despierto</div>
+              <div id="txtSleepAwake" class="font-bold text-appText mt-1">0h 22m</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+    </section>
+
+    <!-- ==================== PESTAÑA 2: ESCÁNER Y DIAGNÓSTICO BLE ==================== -->
+    <section id="tabContent-sniffer" class="space-y-6 hidden">
+
+      <!-- Controles de Escaneo y Conexión -->
+      <div class="bg-appCard border border-appBorder rounded-3xl p-5 shadow-sm space-y-4">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h3 class="font-bold text-base text-appText flex items-center gap-2">
+              <span>📡</span> Escáner Bluetooth Low Energy
+            </h3>
+            <p class="text-xs text-appMuted">Detecta automáticamente periféricos BLE y destaca tu Samsung Galaxy Fit 3 (78DC)</p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <button id="btnRetrieveConnected" onclick="triggerRetrieveConnected()" class="px-4 py-2 rounded-xl bg-fitSage/20 text-fitSage border border-fitSage/40 text-xs font-bold hover:bg-fitSage/30 transition-all flex items-center gap-1.5" title="Busca el reloj directamente en CoreBluetooth si ya está enlazado en macOS">
+              <span>🔗</span> Recuperar Reloj Enlazado al Mac
+            </button>
+            <button id="btnScanBle" onclick="triggerScan()" class="px-4 py-2 rounded-xl bg-fitAmber text-black text-xs font-bold hover:brightness-105 transition-all flex items-center gap-1.5">
+              <span>🔍</span> Escanear Anuncios
+            </button>
+            <button onclick="subscribeAllNotifiable()" class="px-4 py-2 rounded-xl bg-appCardElevated border border-appBorder text-xs font-semibold text-appText hover:border-fitAmber/40 transition-all">
+              ⚡ Suscribir a Todos
+            </button>
+          </div>
+        </div>
+
+        <!-- Lista de Dispositivos Escaneados -->
+        <div id="devicesContainer" class="space-y-2 max-h-56 overflow-y-auto custom-scrollbar pt-2">
+          <div class="p-4 text-center text-xs text-appMuted bg-appCardElevated rounded-2xl border border-appBorder">
+            Haz clic en <strong>"Recuperar Reloj Enlazado al Mac"</strong> (si ya lo vinculaste en Ajustes de macOS) o en <strong>"Escanear Anuncios"</strong> para buscar el Galaxy Fit3.
+          </div>
+        </div>
+      </div>
+
+      <!-- Árbol de Servicios y Características GATT -->
+      <div class="bg-appCard border border-appBorder rounded-3xl p-5 shadow-sm space-y-4">
+        <div class="flex items-center justify-between">
+          <h3 class="font-bold text-base text-appText flex items-center gap-2">
+            <span>🧬</span> Servicios y Características GATT Enumerados
+          </h3>
+          <span id="serviceCountBadge" class="text-xs font-bold text-fitAmber bg-fitAmber/15 px-2.5 py-0.5 rounded-full">
+            0 servicios
+          </span>
+        </div>
+
+        <div id="servicesTreeContainer" class="space-y-3 max-h-64 overflow-y-auto custom-scrollbar">
+          <div class="p-6 text-center text-xs text-appMuted bg-appCardElevated rounded-2xl border border-appBorder">
+            Conecta el reloj o activa el Modo Simulación para explorar sus UUIDs propietarios y servicios estándar.
+          </div>
+        </div>
+      </div>
+
+      <!-- Consola Hexadecimal Sniffer en Vivo -->
+      <div class="bg-appCard border border-appBorder rounded-3xl p-5 shadow-sm space-y-4">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h3 class="font-bold text-base text-appText flex items-center gap-2">
+              <span>📟</span> Consola de Paquetes en Vivo (WebSockets)
+            </h3>
+            <p class="text-xs text-appMuted">Inspecciona bytes crudos, decodificación Little-Endian y texto UTF-8</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button id="btnPauseSniffer" onclick="togglePauseSniffer()" class="px-3 py-1.5 rounded-xl bg-appCardElevated border border-appBorder text-xs font-semibold text-appText hover:border-fitAmber/40">
+              ⏸ Pausar
+            </button>
+            <button onclick="clearPacketLogs()" class="px-3 py-1.5 rounded-xl bg-appCardElevated border border-appBorder text-xs font-semibold text-fitCoral hover:bg-fitCoral/10">
+              🗑️ Limpiar
+            </button>
+          </div>
+        </div>
+
+        <!-- Filtro rápido de paquetes -->
+        <div class="flex gap-2 overflow-x-auto pb-1 text-xs">
+          <button onclick="setFilter('ALL', this)" class="filter-chip px-3 py-1 rounded-full bg-fitAmber text-black font-bold whitespace-nowrap">Todos</button>
+          <button onclick="setFilter('2A37', this)" class="filter-chip px-3 py-1 rounded-full bg-appCardElevated text-appMuted hover:text-appText whitespace-nowrap">Heart Rate (2A37)</button>
+          <button onclick="setFilter('FEA1', this)" class="filter-chip px-3 py-1 rounded-full bg-appCardElevated text-appMuted hover:text-appText whitespace-nowrap">Pasos (FEA1)</button>
+          <button onclick="setFilter('FEA2', this)" class="filter-chip px-3 py-1 rounded-full bg-appCardElevated text-appMuted hover:text-appText whitespace-nowrap">Sueño (FEA2)</button>
+          <button onclick="setFilter('TX', this)" class="filter-chip px-3 py-1 rounded-full bg-appCardElevated text-appMuted hover:text-appText whitespace-nowrap">Comandos TX</button>
+        </div>
+
+        <!-- Contenedor del stream de paquetes -->
+        <div id="packetLogsStream" class="space-y-2 max-h-96 overflow-y-auto custom-scrollbar font-mono text-xs">
+          <!-- Inyectado dinámicamente -->
+        </div>
+
+        <!-- Inyector de Comandos Hexadecimales (TX) -->
+        <div class="pt-4 border-t border-appBorder grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
+          <div class="sm:col-span-1">
+            <label class="block text-[10px] text-appMuted font-bold uppercase mb-1">UUID Característica</label>
+            <input id="txCharUuidInput" type="text" value="FEA1" class="w-full bg-appCardElevated border border-appBorder rounded-xl px-3 py-2 text-xs font-mono text-appText focus:outline-none focus:border-fitAmber" />
+          </div>
+          <div class="sm:col-span-2">
+            <label class="block text-[10px] text-appMuted font-bold uppercase mb-1">Payload Hex (ej. FE A1 01 00)</label>
+            <input id="txHexPayloadInput" type="text" value="FE A1 01 00" class="w-full bg-appCardElevated border border-appBorder rounded-xl px-3 py-2 text-xs font-mono text-appText focus:outline-none focus:border-fitAmber" />
+          </div>
+          <div class="sm:col-span-1">
+            <button onclick="sendCustomHex()" class="w-full py-2 bg-fitAmber text-black font-bold rounded-xl text-xs hover:brightness-105 transition-all">
+              ⚡ Enviar (TX)
+            </button>
+          </div>
+        </div>
+
+      </div>
+
+    </section>
+
+    <!-- ==================== PESTAÑA 3: BASE DE DATOS Y EXPORTACIÓN LOCAL (macOS) ==================== -->
+    <section id="tabContent-data" class="space-y-6 hidden">
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+
+        <!-- Tarjeta de Exportación Directa -->
+        <div class="md:col-span-1 bg-appCard border border-appBorder rounded-3xl p-6 flex flex-col justify-between shadow-sm space-y-4">
+          <div>
+            <div class="flex items-center gap-2 mb-2">
+              <span class="text-2xl">💾</span>
+              <h3 class="font-bold text-base text-appText">Exportar Datos del Mac</h3>
+            </div>
+            <p class="text-xs text-appMuted leading-relaxed">
+              Todos los datos recibidos por Bluetooth del reloj se almacenan de forma local en <code class="text-fitAmber font-mono">fit3_database.sqlite</code>. Puedes descargarlos directamente para análisis o respaldo.
+            </p>
+          </div>
+
+          <!-- Contadores de Registros en SQLite -->
+          <div class="grid grid-cols-2 gap-2 text-xs">
+            <div class="bg-appCardElevated p-3 rounded-2xl border border-appBorder text-center">
+              <span class="text-appMuted text-[10px] block uppercase font-bold">Muestras Pulso</span>
+              <span id="dataCountHr" class="text-fitCoral font-extrabold text-lg">--</span>
+            </div>
+            <div class="bg-appCardElevated p-3 rounded-2xl border border-appBorder text-center">
+              <span class="text-appMuted text-[10px] block uppercase font-bold">Tramas Sniffer</span>
+              <span id="dataCountPackets" class="text-fitAmber font-extrabold text-lg">--</span>
+            </div>
+          </div>
+
+          <div class="space-y-2 pt-2">
+            <a href="/api/export/csv" download="fit3_heart_rate.csv" class="w-full py-2.5 bg-fitAmber text-black rounded-xl text-xs font-bold flex items-center justify-center gap-2 hover:brightness-105 transition-all shadow-sm">
+              <span>📊</span> Descargar Pulso (CSV)
+            </a>
+            <a href="/api/export/json" download="fit3_database_backup.json" class="w-full py-2.5 bg-appCardElevated border border-appBorder text-appText hover:border-fitAmber/40 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all">
+              <span>📦</span> Descargar Base Completa (JSON)
+            </a>
+            <button onclick="fetchDataRecords()" class="w-full py-2 text-xs text-appMuted hover:text-appText transition-all">
+              🔄 Actualizar Estadísticas
+            </button>
+          </div>
+        </div>
+
+        <!-- Tabla de Registros Almacenados en SQLite -->
+        <div class="md:col-span-2 bg-appCard border border-appBorder rounded-3xl p-6 shadow-sm space-y-4">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <span class="text-fitSage">🗄️</span>
+              <h3 class="font-bold text-base text-appText">Registros Recientes en SQLite (macOS)</h3>
+            </div>
+            <span class="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-fitSage/20 text-fitSage border border-fitSage/30">
+              Almacenamiento Local WAL
+            </span>
+          </div>
+
+          <p class="text-xs text-appMuted">
+            Historial de muestras registradas directamente por el servicio de fondo de CoreBluetooth en tu Mac.
+          </p>
+
+          <div class="overflow-x-auto max-h-72 custom-scrollbar">
+            <table class="w-full text-left text-xs">
+              <thead class="text-[10px] uppercase text-appMuted border-b border-appBorder sticky top-0 bg-appCard">
+                <tr>
+                  <th class="py-2 px-2">Hora</th>
+                  <th class="py-2 px-2">Tipo</th>
+                  <th class="py-2 px-2">Valor</th>
+                  <th class="py-2 px-2">Origen</th>
+                </tr>
+              </thead>
+              <tbody id="dataTableBody" class="divide-y divide-appBorder font-mono text-[11px]">
+                <tr>
+                  <td colspan="4" class="py-4 text-center text-appMuted">Cargando registros...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+        </div>
+
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- Footer -->
+  <footer class="border-t border-appBorder bg-appBg/80 px-4 py-3 text-center text-xs text-appMuted">
+    Fit3 Mac Studio • Samsung Galaxy Fit 3 (SM-R390) • macOS Monterey Local SQLite
+  </footer>
+
+  <!-- Toast Notifier -->
+  <div id="toastNotification" class="fixed bottom-6 right-6 z-50 transform translate-y-24 opacity-0 transition-all duration-300 bg-appCardElevated border border-fitAmber/40 text-appText px-4 py-3 rounded-2xl shadow-xl flex items-center gap-3 text-xs font-semibold">
+    <span id="toastIcon">ℹ️</span>
+    <span id="toastMsg">Notificación</span>
+  </div>
+
+  <!-- Script Principal de la Aplicación -->
+  <script>
+    // MARK: - Estado Global
+    const state = {
+      activeTab: 'dashboard',
+      isMockMode: false,
+      isSnifferPaused: false,
+      packetFilter: 'ALL',
+      localIp: 'localhost',
+      serverPort: 8000,
+      packets: [],
+      hrHistory: []
+    };
+
+    let hrChart = null;
+    let ws = null;
+
+    // MARK: - Inicialización al cargar la página
+    document.addEventListener("DOMContentLoaded", () => {
+      initHeartRateChart();
+      initWebSocket();
+      fetchStatus();
+      fetchTelemetry();
+      fetchDevices();
+      fetchServices();
+      fetchDataRecords();
+    });
+
+    // MARK: - Control de Pestañas
+    function switchTab(tabId) {
+      state.activeTab = tabId;
+      const tabs = ['dashboard', 'sniffer', 'data'];
+
+      tabs.forEach(t => {
+        const navBtn = document.getElementById(`tabNav-${t}`);
+        const content = document.getElementById(`tabContent-${t}`);
+        if (!navBtn || !content) return;
+        if (t === tabId) {
+          content.classList.remove('hidden');
+          navBtn.classList.remove('text-appMuted', 'hover:text-appText');
+          navBtn.classList.add('bg-fitAmber', 'text-black', 'shadow-md');
+        } else {
+          content.classList.add('hidden');
+          navBtn.classList.remove('bg-fitAmber', 'text-black', 'shadow-md');
+          navBtn.classList.add('text-appMuted', 'hover:text-appText');
+        }
+      });
+
+      if (tabId === 'dashboard' && hrChart) {
+        setTimeout(() => hrChart.resize(), 50);
+      }
+      if (tabId === 'data') {
+        fetchDataRecords();
+      }
+    }
+
+    // MARK: - Gráfica Chart.js de Frecuencia Cardíaca
+    function initHeartRateChart() {
+      const ctx = document.getElementById('hrChartCanvas').getContext('2d');
+      const gradient = ctx.createLinearGradient(0, 0, 0, 180);
+      gradient.addColorStop(0, 'rgba(217, 95, 91, 0.40)');
+      gradient.addColorStop(1, 'rgba(217, 95, 91, 0.01)');
+
+      hrChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: [],
+          datasets: [{
+            data: [],
+            borderColor: '#D95F5B',
+            backgroundColor: gradient,
+            borderWidth: 2.5,
+            fill: true,
+            tension: 0.35,
+            pointRadius: 3.5,
+            pointBackgroundColor: '#D95F5B',
+            pointBorderColor: '#1E1A17',
+            pointBorderWidth: 1.5
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: '#28221D',
+              titleColor: '#A89F94',
+              bodyColor: '#F7F2EB',
+              borderColor: 'rgba(245, 232, 214, 0.1)',
+              borderWidth: 1,
+              callbacks: {
+                label: (ctx) => `${ctx.raw} BPM`
+              }
+            }
+          },
+          scales: {
+            x: {
+              grid: { display: false },
+              ticks: { color: '#A89F94', font: { size: 10 } }
+            },
+            y: {
+              min: 50,
+              max: 130,
+              grid: { color: 'rgba(245, 232, 214, 0.05)' },
+              ticks: { color: '#A89F94', font: { size: 10 }, stepSize: 20 }
+            }
+          }
+        }
+      });
+    }
+
+    function updateChartData(samples) {
+      if (!hrChart || !samples) return;
+      const labels = samples.map(s => {
+        const t = s.timestamp || "";
+        return t.length >= 19 ? t.substring(11, 16) : "";
+      });
+      const data = samples.map(s => s.bpm);
+
+      hrChart.data.labels = labels;
+      hrChart.data.datasets[0].data = data;
+      hrChart.update();
+    }
+
+    // MARK: - WebSockets para Telemetría y Paquetes Hex en Vivo
+    function initWebSocket() {
+      const loc = window.location;
+      const wsProtocol = loc.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${wsProtocol}//${loc.host}/ws/ble-logs`;
+
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        console.log("WebSocket BLE conectado.");
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'init') {
+            updateStatusUI(msg.status);
+            updateTelemetryUI(msg.telemetry);
+            renderServicesTree(msg.services);
+            if (msg.recent_packets) {
+              msg.recent_packets.forEach(p => appendPacketToConsole(p, false));
+            }
+          } else if (msg.type === 'telemetry_update') {
+            updateTelemetryUI(msg.data);
+          } else if (msg.type === 'status_update') {
+            updateStatusUI(msg.data);
+          } else if (msg.type === 'ble_packet') {
+            appendPacketToConsole(msg.data, true);
+          } else if (msg.type === 'services_discovered') {
+            renderServicesTree(msg.data);
+          }
+        } catch (e) {
+          console.error("Error al procesar mensaje WebSocket:", e);
+        }
+      };
+
+      ws.onclose = () => {
+        console.warn("WebSocket cerrado. Reintentando en 3s...");
+        setTimeout(initWebSocket, 3000);
+      };
+    }
+
+    // MARK: - Actualizaciones de UI
+    function updateStatusUI(status) {
+      if (!status) return;
+      state.isMockMode = status.is_mock_mode;
+
+      const badge = document.getElementById('connBadge');
+      const sub = document.getElementById('subStatusText');
+      const cardName = document.getElementById('cardDeviceName');
+      const cardMsg = document.getElementById('cardDeviceStatusMsg');
+      const btnMock = document.getElementById('mockBtnText');
+      const quickBtn = document.getElementById('btnQuickConnect');
+      const avatar = document.getElementById('deviceAvatar');
+
+      sub.textContent = status.last_status_message;
+      cardMsg.textContent = status.last_status_message;
+
+      if (status.connection_state === 'connected') {
+        badge.textContent = "Conectado";
+        badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-fitSage/20 text-fitSage border border-fitSage/30";
+        cardName.textContent = status.connected_device_name;
+        quickBtn.textContent = "Desconectar";
+        quickBtn.className = "px-4 py-2 rounded-xl bg-fitCoral text-white text-xs font-bold hover:brightness-105 transition-all";
+        avatar.classList.add('pulse-watch');
+      } else if (status.connection_state === 'simulating') {
+        badge.textContent = "Simulación";
+        badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-fitAmber/20 text-fitAmber border border-fitAmber/30";
+        cardName.textContent = "Galaxy Fit3 (78DC) [Sim]";
+        quickBtn.textContent = "Detener Sim";
+        quickBtn.className = "px-4 py-2 rounded-xl bg-appCardElevated text-appText border border-appBorder text-xs font-bold";
+        avatar.classList.remove('pulse-watch');
+      } else if (status.connection_state === 'connecting' || status.connection_state === 'scanning') {
+        badge.textContent = status.connection_state === 'scanning' ? "Buscando..." : "Conectando...";
+        badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-fitTerracotta/20 text-fitTerracotta border border-fitTerracotta/30";
+      } else {
+        badge.textContent = "Desconectado";
+        badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-appCardElevated text-appMuted border border-appBorder";
+        quickBtn.textContent = "Conectar Reloj";
+        quickBtn.className = "px-4 py-2 rounded-xl bg-fitAmber text-black text-xs font-bold hover:brightness-105 transition-all";
+        avatar.classList.remove('pulse-watch');
+      }
+
+      btnMock.textContent = state.isMockMode ? "Simulación ON" : "Simulación OFF";
+
+      // Actualizar IP local y QR si vino en el payload
+      if (status.local_ip) {
+        state.localIp = status.local_ip;
+        const url = `http://${status.local_ip}:${status.server_port || 8000}`;
+        document.getElementById('localIpUrlText').textContent = url;
+        document.getElementById('shortcutEndpointCode').textContent = `${url}/api/apple-health-export`;
+        renderQRCode(url);
+      }
+    }
+
+    function updateTelemetryUI(t) {
+      if (!t) return;
+      document.getElementById('valSteps').textContent = Number(t.steps || 0).toLocaleString();
+      document.getElementById('valCalories').textContent = Math.round(t.calories || 0);
+      document.getElementById('valActiveMins').textContent = t.active_minutes || 0;
+      document.getElementById('distanceKmBadge').textContent = `${((t.distance_meters || 0) / 1000).toFixed(2)} km`;
+
+      document.getElementById('valHeartRateBpm').textContent = t.heart_rate_latest || 72;
+      document.getElementById('valHeartRateAvg').textContent = `Promedio hoy: ${t.heart_rate_avg || 72} BPM`;
+      document.getElementById('valBatteryLevel').textContent = `${t.battery || 85}%`;
+      document.getElementById('headerBatteryVal').textContent = `${t.battery || 85}%`;
+      document.getElementById('barBattery').style.width = `${t.battery || 85}%`;
+      document.getElementById('valSpO2').textContent = t.spo2 || 98;
+
+      // Anillos concéntricos SVG
+      const stepProg = Math.min((t.steps || 0) / 10000, 1);
+      const calProg = Math.min((t.calories || 0) / 400, 1);
+      const actProg = Math.min((t.active_minutes || 0) / 60, 1);
+
+      document.getElementById('ringStepsSvg').style.strokeDashoffset = 351.86 * (1 - stepProg);
+      document.getElementById('ringCaloriesSvg').style.strokeDashoffset = 257.61 * (1 - calProg);
+      document.getElementById('ringActiveSvg').style.strokeDashoffset = 163.36 * (1 - actProg);
+
+      // Fases de sueño
+      if (t.sleep) {
+        const s = t.sleep;
+        const total = (s.deep_minutes || 0) + (s.light_minutes || 0) + (s.rem_minutes || 0);
+        const inBed = total + (s.awake_minutes || 0);
+
+        document.getElementById('valSleepTotalTime').textContent = `${Math.floor(total / 60)}h ${total % 60}m`;
+        document.getElementById('valSleepScore').textContent = `Puntuación ${s.sleep_score || 85}`;
+
+        if (inBed > 0) {
+          document.getElementById('barSleepDeep').style.width = `${(s.deep_minutes / inBed) * 100}%`;
+          document.getElementById('barSleepLight').style.width = `${(s.light_minutes / inBed) * 100}%`;
+          document.getElementById('barSleepRem').style.width = `${(s.rem_minutes / inBed) * 100}%`;
+          document.getElementById('barSleepAwake').style.width = `${(s.awake_minutes / inBed) * 100}%`;
+        }
+
+        document.getElementById('txtSleepDeep').textContent = `${Math.floor((s.deep_minutes || 0) / 60)}h ${(s.deep_minutes || 0) % 60}m`;
+        document.getElementById('txtSleepLight').textContent = `${Math.floor((s.light_minutes || 0) / 60)}h ${(s.light_minutes || 0) % 60}m`;
+        document.getElementById('txtSleepRem').textContent = `${Math.floor((s.rem_minutes || 0) / 60)}h ${(s.rem_minutes || 0) % 60}m`;
+        document.getElementById('txtSleepAwake').textContent = `0h ${s.awake_minutes || 0}m`;
+      }
+
+      if (t.hr_chart) {
+        updateChartData(t.hr_chart);
+      }
+    }
+
+    // MARK: - Sniffer BLE: Consola de Paquetes
+    function appendPacketToConsole(p, prepend = true) {
+      if (state.isSnifferPaused) return;
+
+      const container = document.getElementById('packetLogsStream');
+      const card = document.createElement('div');
+      card.className = "p-3 rounded-2xl bg-appCardElevated border border-appBorder space-y-1.5 transition-all";
+      card.dataset.char = (p.short_uuid || p.char_uuid || "").toUpperCase();
+      card.dataset.dir = p.direction || "RX";
+
+      const dirColor = p.direction === "TX" ? "bg-fitTerracotta/20 text-fitTerracotta" : "bg-fitAmber/20 text-fitAmber";
+
+      card.innerHTML = `
+        <div class="flex items-center justify-between text-[10px]">
+          <div class="flex items-center gap-1.5 font-bold">
+            <span class="px-1.5 py-0.5 rounded font-mono ${dirColor}">${p.direction}</span>
+            <span class="text-appText">Char: ${p.short_uuid || p.char_uuid}</span>
+          </div>
+          <span class="text-appMuted">${p.timestamp || ""}</span>
+        </div>
+        <div class="text-xs font-bold text-appText tracking-wider break-all">
+          <span class="text-fitSage mr-1">HEX:</span>${p.hex_string}
+        </div>
+        <div class="flex flex-wrap items-center justify-between text-[10px] text-appMuted pt-1 border-t border-appBorder/50">
+          <span>UTF8: "${p.utf8_preview || ""}"</span>
+          <span class="text-fitAmber font-bold">${p.decoded_summary || ""}</span>
+        </div>
+        ${p.note ? `<div class="text-[10px] text-fitMauve font-semibold">${p.note}</div>` : ''}
+      `;
+
+      if (prepend) {
+        container.insertBefore(card, container.firstChild);
+        if (container.children.length > 70) {
+          container.removeChild(container.lastChild);
+        }
+      } else {
+        container.appendChild(card);
+      }
+
+      applyConsoleFilter();
+    }
+
+    function setFilter(tag, btn) {
+      state.packetFilter = tag;
+      document.querySelectorAll('.filter-chip').forEach(b => {
+        b.className = "filter-chip px-3 py-1 rounded-full bg-appCardElevated text-appMuted hover:text-appText whitespace-nowrap";
+      });
+      btn.className = "filter-chip px-3 py-1 rounded-full bg-fitAmber text-black font-bold whitespace-nowrap";
+      applyConsoleFilter();
+    }
+
+    function applyConsoleFilter() {
+      const cards = document.querySelectorAll('#packetLogsStream > div');
+      cards.forEach(card => {
+        const char = card.dataset.char || "";
+        const dir = card.dataset.dir || "";
+        if (state.packetFilter === 'ALL') {
+          card.style.display = 'block';
+        } else if (state.packetFilter === 'TX') {
+          card.style.display = dir === 'TX' ? 'block' : 'none';
+        } else {
+          card.style.display = char.includes(state.packetFilter) ? 'block' : 'none';
+        }
+      });
+    }
+
+    function togglePauseSniffer() {
+      state.isSnifferPaused = !state.isSnifferPaused;
+      const btn = document.getElementById('btnPauseSniffer');
+      btn.textContent = state.isSnifferPaused ? "▶ Reanudar" : "⏸ Pausar";
+      showToast(state.isSnifferPaused ? "Sniffer pausado" : "Sniffer reanudado");
+    }
+
+    function clearPacketLogs() {
+      document.getElementById('packetLogsStream').innerHTML = "";
+      showToast("Consola de paquetes limpia.");
+    }
+
+    // MARK: - Árbol de Servicios y Características
+    function renderServicesTree(services) {
+      const container = document.getElementById('servicesTreeContainer');
+      const badge = document.getElementById('serviceCountBadge');
+      if (!services || !services.length) {
+        badge.textContent = "0 servicios";
+        return;
+      }
+
+      badge.textContent = `${services.length} servicios`;
+      container.innerHTML = services.map(s => `
+        <div class="p-4 rounded-2xl bg-appCardElevated border border-appBorder space-y-3">
+          <div class="flex items-center justify-between">
+            <div>
+              <div class="flex items-center gap-2">
+                <span class="font-mono font-bold text-xs text-appText">0x${s.short_uuid}</span>
+                <span class="font-bold text-xs text-appText">${s.name}</span>
+                ${s.is_proprietary ? '<span class="text-[9px] font-bold px-1.5 py-0.5 rounded bg-fitMauve/20 text-fitMauve">SAMSUNG</span>' : ''}
+              </div>
+              <p class="text-[10px] text-appMuted font-mono mt-0.5">${s.uuid}</p>
+            </div>
+          </div>
+
+          <div class="space-y-2 pt-2 border-t border-appBorder/60">
+            ${s.characteristics.map(c => `
+              <div class="p-2.5 rounded-xl bg-appBg border border-appBorder/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div class="space-y-1">
+                  <div class="flex items-center gap-2">
+                    <span class="font-mono text-xs font-bold text-fitAmber">0x${c.short_uuid}</span>
+                    <span class="text-xs text-appText font-medium">${c.name}</span>
+                  </div>
+                  <div class="flex gap-1 text-[9px] font-mono">
+                    ${c.properties.map(p => `<span class="px-1.5 py-0.5 rounded bg-appCard text-appMuted uppercase">${p}</span>`).join('')}
+                  </div>
+                  <p class="text-[10px] font-mono text-fitSage">Último HEX: ${c.last_hex || '—'}</p>
+                </div>
+
+                <div class="flex items-center gap-1.5 self-end sm:self-center">
+                  ${c.can_read ? `<button onclick="readChar('${c.uuid}')" class="px-2.5 py-1 rounded-lg bg-appCard hover:bg-appCardElevated text-[10px] font-bold text-appText border border-appBorder">Read</button>` : ''}
+                  ${c.can_notify ? `<button onclick="toggleNotifyChar('${c.uuid}')" class="px-2.5 py-1 rounded-lg ${c.is_notifying ? 'bg-fitSage text-black' : 'bg-appCard text-appText'} text-[10px] font-bold border border-appBorder">${c.is_notifying ? 'Notify ON' : 'Notify'}</button>` : ''}
+                  <button onclick="mapChar('steps', '${c.short_uuid}')" class="px-2 py-1 rounded-lg bg-fitAmber/15 hover:bg-fitAmber text-fitAmber hover:text-black text-[10px] font-bold transition-all">
+                    Pasos
+                  </button>
+                  <button onclick="mapChar('heart_rate', '${c.short_uuid}')" class="px-2 py-1 rounded-lg bg-fitCoral/15 hover:bg-fitCoral text-fitCoral hover:text-white text-[10px] font-bold transition-all">
+                    Pulso
+                  </button>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `).join('');
+    }
+
+    // MARK: - Acciones BLE y API Calls
+    async function fetchDevices() {
+      try {
+        const res = await fetch('/api/devices');
+        const data = await res.json();
+        if (data.devices && data.devices.length > 0) {
+          renderDevicesList(data.devices);
+        }
+      } catch (e) {}
+    }
+
+    async function triggerRetrieveConnected() {
+      const btn = document.getElementById('btnRetrieveConnected');
+      const originalHtml = btn ? btn.innerHTML : '';
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = `<span class="animate-spin inline-block">⏳</span> Buscando en macOS...`;
+      }
+      showToast("Consultando CoreBluetooth por reloj ya enlazado en macOS...");
+
+      try {
+        const res = await fetch('/api/retrieve-connected', { method: 'POST' });
+        const data = await res.json();
+        renderDevicesList(data.devices || []);
+        showToast(data.message || `Dispositivos encontrados: ${data.count || 0}`);
+      } catch (e) {
+        showToast("Error al consultar dispositivos enlazados.", true);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = originalHtml;
+        }
+      }
+    }
+
+    async function triggerScan() {
+      const btn = document.getElementById('btnScanBle');
+      btn.disabled = true;
+      btn.innerHTML = `<span class="animate-spin inline-block">⏳</span> Escaneando...`;
+      showToast("Iniciando escaneo BLE de anuncios (6s)...");
+
+      try {
+        const res = await fetch('/api/scan', { method: 'POST' });
+        const data = await res.json();
+        renderDevicesList(data.devices || []);
+        showToast(`Escaneo finalizado: ${data.count || 0} dispositivos.`);
+      } catch (e) {
+        showToast("Error al escanear BLE.", true);
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = `<span>🔍</span> Escanear Anuncios`;
+      }
+    }
+
+    function renderDevicesList(devices) {
+      const container = document.getElementById('devicesContainer');
+      if (!devices.length) {
+        container.innerHTML = `<div class="p-4 text-center text-xs text-appMuted bg-appCardElevated rounded-2xl border border-appBorder">No se encontraron dispositivos BLE cercanos ni enlazados en macOS.</div>`;
+        return;
+      }
+
+      container.innerHTML = devices.map(d => `
+        <div class="p-3.5 rounded-2xl ${d.is_connected_system ? 'bg-fitSage/10 border-fitSage/40 shadow-sm' : (d.is_fit3 ? 'bg-fitAmber/10 border-fitAmber/40' : 'bg-appCardElevated border-appBorder')} border flex items-center justify-between gap-3">
+          <div class="space-y-1">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="font-bold text-xs text-appText">${d.name}</span>
+              ${d.is_fit3 ? '<span class="text-[9px] font-extrabold px-1.5 py-0.5 rounded bg-fitAmber text-black">GALAXY FIT 3</span>' : ''}
+              ${d.is_connected_system ? '<span class="text-[9px] font-bold px-2 py-0.5 rounded bg-fitSage/20 text-fitSage border border-fitSage/40 flex items-center gap-1"><span>⚡</span> YA ENLAZADO A MACOS</span>' : ''}
+            </div>
+            <p class="text-[10px] text-appMuted font-mono">${d.address} • RSSI: ${d.rssi} dBm ${d.system_status ? `• <span class="text-fitSage font-medium">${d.system_status}</span>` : ''}</p>
+          </div>
+          <button onclick="connectDevice('${d.address}', this)" class="px-3.5 py-1.5 rounded-xl ${d.is_connected_system ? 'bg-fitSage text-black font-extrabold shadow-sm' : (d.is_fit3 ? 'bg-fitAmber text-black font-bold' : 'bg-appCard text-appText font-medium border border-appBorder')} text-xs hover:brightness-105 transition-all whitespace-nowrap">
+            ${d.is_connected_system ? 'Conectar Directo' : 'Conectar'}
+          </button>
+        </div>
+      `).join('');
+    }
+
+    async function connectDevice(address, btnElement = null) {
+      const originalText = btnElement ? btnElement.innerHTML : null;
+      if (btnElement) {
+        btnElement.disabled = true;
+        btnElement.innerHTML = `<span class="animate-spin inline-block">⏳</span> Conectando...`;
+      }
+      showToast(`Conectando con ${address}...`);
+      try {
+        const res = await fetch('/api/connect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ address })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          showToast(`¡Conectado exitosamente con ${data.name}!`);
+          if (btnElement) {
+            btnElement.innerHTML = `✅ Conectado`;
+            btnElement.disabled = true;
+          }
+          fetchServices();
+          fetchStatus();
+          fetchTelemetry();
+        } else {
+          showToast(data.detail || "Error al conectar.", true);
+          if (btnElement) {
+            btnElement.disabled = false;
+            btnElement.innerHTML = originalText;
+          }
+        }
+      } catch (e) {
+        showToast("Error de conexión BLE. Revisa permisos Bluetooth de macOS.", true);
+        if (btnElement) {
+          btnElement.disabled = false;
+          btnElement.innerHTML = originalText;
+        }
+      }
+    }
+
+    async function handleQuickConnect() {
+      if (document.getElementById('connBadge').textContent.includes('Conectado')) {
+        await fetch('/api/disconnect', { method: 'POST' });
+        showToast("Reloj desconectado.");
+      } else {
+        switchTab('sniffer');
+        await triggerRetrieveConnected();
+      }
+    }
+
+    async function toggleMockMode() {
+      const targetState = !state.isMockMode;
+      try {
+        const res = await fetch('/api/mock/toggle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: targetState })
+        });
+        const data = await res.json();
+        showToast(targetState ? "🧪 Modo Simulación activado" : "📡 Modo BLE Real activado");
+      } catch (e) {
+        showToast("Error al alternar modo simulación.");
+      }
+    }
+
+    async function subscribeAllNotifiable() {
+      showToast("Suscribiendo a todas las características...");
+      try {
+        const res = await fetch('/api/characteristics/notify-all', { method: 'POST' });
+        const data = await res.json();
+        showToast(`Suscripción activa en ${data.subscribed_count} características.`);
+        fetchServices();
+      } catch (e) {
+        showToast("Error al suscribir.");
+      }
+    }
+
+    async function readChar(uuid) {
+      showToast(`Leyendo ${uuid}...`);
+      try {
+        const res = await fetch('/api/characteristics/read', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uuid })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          showToast(`Leído: ${data.hex_value}`);
+        } else {
+          showToast(data.detail || "No se pudo leer.");
+        }
+      } catch (e) {
+        showToast("Error de lectura BLE.");
+      }
+    }
+
+    async function toggleNotifyChar(uuid) {
+      try {
+        const res = await fetch('/api/characteristics/notify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uuid })
+        });
+        const data = await res.json();
+        showToast(`Notificación: ${data.status}`);
+        fetchServices();
+      } catch (e) {
+        showToast("Error al cambiar notificación.");
+      }
+    }
+
+    async function mapChar(target, uuid) {
+      try {
+        const res = await fetch('/api/characteristics/map', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target, uuid })
+        });
+        showToast(`UUID ${uuid} asignado a ${target.toUpperCase()}`);
+      } catch (e) {
+        showToast("Error al mapear característica.");
+      }
+    }
+
+    async function sendCustomHex() {
+      const uuid = document.getElementById('txCharUuidInput').value.trim();
+      const hex_payload = document.getElementById('txHexPayloadInput').value.trim();
+      if (!uuid || !hex_payload) return;
+
+      try {
+        const res = await fetch('/api/characteristics/write', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uuid, hex_payload })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          showToast(`TX enviado a ${uuid}`);
+        } else {
+          showToast(data.detail || "Error al enviar TX.");
+        }
+      } catch (e) {
+        showToast("Error al enviar comando.");
+      }
+    }
+
+    // MARK: - Base de Datos Local & Exportación en macOS
+    async function fetchDataRecords() {
+      try {
+        const res = await fetch('/api/data/records');
+        const data = await res.json();
+        const tables = data.tables || {};
+        
+        const hrCount = (tables.heart_rate || []).length;
+        const packetCount = (tables.ble_packets || []).length;
+        
+        const elHr = document.getElementById('dataCountHr');
+        const elPackets = document.getElementById('dataCountPackets');
+        if (elHr) elHr.textContent = hrCount;
+        if (elPackets) elPackets.textContent = packetCount;
+
+        const tbody = document.getElementById('dataTableBody');
+        if (!tbody) return;
+
+        const rows = [];
+        (tables.heart_rate || []).slice(0, 15).forEach(r => {
+          const time = r.timestamp ? (r.timestamp.split('T')[1]?.substring(0, 8) || r.timestamp) : '--';
+          rows.push(`
+            <tr class="hover:bg-appCardElevated/50 transition-colors">
+              <td class="py-2.5 px-2 text-appMuted">${time}</td>
+              <td class="py-2.5 px-2 text-fitCoral font-bold">Frecuencia Cardíaca</td>
+              <td class="py-2.5 px-2 text-appText font-bold">${r.bpm} BPM</td>
+              <td class="py-2.5 px-2 text-appMuted text-[10px]">${r.source || 'BLE'}</td>
+            </tr>
+          `);
+        });
+
+        (tables.steps || []).slice(0, 5).forEach(s => {
+          rows.push(`
+            <tr class="hover:bg-appCardElevated/50 transition-colors">
+              <td class="py-2.5 px-2 text-appMuted">${s.day_date || '--'}</td>
+              <td class="py-2.5 px-2 text-fitAmber font-bold">Pasos del Día</td>
+              <td class="py-2.5 px-2 text-appText font-bold">${s.steps} pasos (${s.calories} kcal)</td>
+              <td class="py-2.5 px-2 text-appMuted text-[10px]">${s.source || 'BLE'}</td>
+            </tr>
+          `);
+        });
+
+        tbody.innerHTML = rows.length ? rows.join('') : `<tr><td colspan="4" class="py-4 text-center text-appMuted">Sin registros en la base de datos aún.</td></tr>`;
+      } catch (e) {
+        console.error("Error al obtener registros SQLite:", e);
+      }
+    }
+
+    // MARK: - Fetchers Auxiliares
+    async function fetchStatus() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        updateStatusUI(data);
+      } catch (e) {}
+    }
+
+    async function fetchTelemetry() {
+      try {
+        const res = await fetch('/api/health/summary');
+        const data = await res.json();
+        updateTelemetryUI(data);
+      } catch (e) {}
+    }
+
+    async function fetchServices() {
+      try {
+        const res = await fetch('/api/services');
+        const data = await res.json();
+        renderServicesTree(data.services || []);
+      } catch (e) {}
+    }
+
+    // MARK: - Toast Notifier
+    let toastTimeout = null;
+    function showToast(msg, isError = false) {
+      const el = document.getElementById('toastNotification');
+      const icon = document.getElementById('toastIcon');
+      if (icon) {
+        icon.textContent = isError ? '⚠️' : 'ℹ️';
+      }
+      document.getElementById('toastMsg').textContent = msg;
+      el.classList.remove('translate-y-24', 'opacity-0');
+      clearTimeout(toastTimeout);
+      toastTimeout = setTimeout(() => {
+        el.classList.add('translate-y-24', 'opacity-0');
+      }, isError ? 6000 : 3200);
+    }
+  </script>
+</body>
+</html>
