@@ -214,6 +214,7 @@ def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
 # MARK: - Query Functions
 
 def purge_demo_data():
+    init_db()
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM steps WHERE source LIKE '%Demo%'")
