@@ -439,17 +439,48 @@ class BLEManager:
                 if ble_device.details and isinstance(ble_device.details, tuple):
                     self._active_peripheral = ble_device.details[0]
 
-                self.client = BleakClient(
-                    ble_device,
-                    disconnected_callback=on_disconnect,
-                    timeout=20.0
-                )
-                
-                # CRÍTICO: En Bleak 1.0+, connect() retorna None (no booleano) si tiene éxito y lanza excepción si falla.
-                await self.client.connect()
-                
+                connected_ok = False
+                try:
+                    self.client = BleakClient(
+                        ble_device,
+                        disconnected_callback=on_disconnect,
+                        timeout=15.0
+                    )
+                    await self.client.connect()
+                    connected_ok = self.client.is_connected
+                except Exception as first_err:
+                    logger.warning(f"Primer intento de conexión a {address} falló ({first_err}). Intentando fallback via BleakScanner.find_device_by_address...")
+                    if self.client:
+                        try:
+                            await self.client.disconnect()
+                        except Exception:
+                            pass
+                        self.client = None
+
+                    # Fallback: intentar resolver nuevamente el BLEDevice mediante escaneo directo
+                    try:
+                        fresh_dev = await BleakScanner.find_device_by_address(address, timeout=5.0)
+                        if fresh_dev:
+                            logger.info(f"Fallback encontró BLEDevice fresco: {fresh_dev}")
+                            self.discovered_devices[address] = fresh_dev
+                            ble_device = fresh_dev
+                            if ble_device.details and isinstance(ble_device.details, tuple):
+                                self._active_peripheral = ble_device.details[0]
+                            self.client = BleakClient(
+                                ble_device,
+                                disconnected_callback=on_disconnect,
+                                timeout=15.0
+                            )
+                            await self.client.connect()
+                            connected_ok = self.client.is_connected
+                    except Exception as fb_err:
+                        logger.warning(f"Fallback de escaneo falló: {fb_err}")
+
+                    if not connected_ok:
+                        raise first_err
+
                 # Validar estado mediante is_connected
-                if self.client.is_connected:
+                if connected_ok and self.client and self.client.is_connected:
                     self.connected_device_address = address
                     self.connected_device_name = device_name
                     self.connection_state = "connected"
@@ -551,6 +582,7 @@ class BLEManager:
 
             chars_info = []
             for char in service.characteristics:
+                last_hex = None
                 short_c_uuid = normalize_uuid(char.uuid)
                 c_name = STANDARD_UUIDS.get(short_c_uuid, f"Característica {short_c_uuid.upper()}")
                 props = char.properties
@@ -856,7 +888,8 @@ class BLEManager:
             if 30 <= bpm <= 240:
                 self.current_hr = bpm
                 self.has_real_hr = True
-                database.save_heart_rate(bpm=bpm, contact=contact, rr_interval_ms=rr_ms, source="Galaxy Fit3 BLE (Confirmado)")
+                if not self.is_mock_mode:
+                    database.save_heart_rate(bpm=bpm, contact=contact, rr_interval_ms=rr_ms, source="Galaxy Fit3 BLE (Confirmado)")
                 note = f"Pulso real: {bpm} BPM"
 
         # 2. Battery Service GATT (0x2A19)
@@ -865,7 +898,8 @@ class BLEManager:
             if 0 <= level <= 100:
                 self.battery_level = level
                 self.has_real_battery = True
-                database.save_battery(self.battery_level)
+                if not self.is_mock_mode:
+                    database.save_battery(self.battery_level)
                 note = f"Batería real: {self.battery_level}%"
 
         # 3. Device Info (0x2A24 / 0x2A26 / 0x2A29)
@@ -906,13 +940,14 @@ class BLEManager:
                 self.today_calories = round(steps * 0.042, 1)
                 self.today_distance = round(steps * 0.74, 1)
                 self.today_active_minutes = max(self.today_active_minutes or 0, int(steps / 115))
-                database.save_steps(
-                    steps=self.today_steps,
-                    calories=self.today_calories,
-                    distance=self.today_distance,
-                    active_minutes=self.today_active_minutes,
-                    source="Galaxy Fit3 BLE (Confirmado)"
-                )
+                if not self.is_mock_mode:
+                    database.save_steps(
+                        steps=self.today_steps,
+                        calories=self.today_calories,
+                        distance=self.today_distance,
+                        active_minutes=self.today_active_minutes,
+                        source="Galaxy Fit3 BLE (Confirmado)"
+                    )
                 note = f"Pasos confirmados: {steps}"
 
         # Fallback heurístico para tramas con prefijo Samsung FE A1
@@ -929,13 +964,14 @@ class BLEManager:
                 self.today_calories = round(steps * 0.042, 1)
                 self.today_distance = round(steps * 0.74, 1)
                 self.today_active_minutes = max(self.today_active_minutes or 0, int(steps / 115))
-                database.save_steps(
-                    steps=self.today_steps,
-                    calories=self.today_calories,
-                    distance=self.today_distance,
-                    active_minutes=self.today_active_minutes,
-                    source="Galaxy Fit3 BLE (Confirmado)"
-                )
+                if not self.is_mock_mode:
+                    database.save_steps(
+                        steps=self.today_steps,
+                        calories=self.today_calories,
+                        distance=self.today_distance,
+                        active_minutes=self.today_active_minutes,
+                        source="Galaxy Fit3 BLE (Confirmado)"
+                    )
                 note = f"Pasos decodificados: {self.today_steps}"
 
         # 5. Mapeo Heurístico de Fases de Sueño (FE A2 ...)
@@ -948,16 +984,17 @@ class BLEManager:
                 awake = byte_list[offset + 3]
                 now_date = datetime.now().strftime("%Y-%m-%d")
                 self.has_real_sleep = True
-                database.save_sleep_session(
-                    start_time=f"{now_date}T00:15:00",
-                    end_time=f"{now_date}T07:20:00",
-                    deep=deep,
-                    light=light,
-                    rem=rem,
-                    awake=awake,
-                    score=min(98, 65 + int(deep / 4)),
-                    source="Galaxy Fit3 BLE (Confirmado)"
-                )
+                if not self.is_mock_mode:
+                    database.save_sleep_session(
+                        start_time=f"{now_date}T00:15:00",
+                        end_time=f"{now_date}T07:20:00",
+                        deep=deep,
+                        light=light,
+                        rem=rem,
+                        awake=awake,
+                        score=min(98, 65 + int(deep / 4)),
+                        source="Galaxy Fit3 BLE (Confirmado)"
+                    )
                 note = f"Sueño RX: Prof {deep}m / Lig {light}m / REM {rem}m"
 
         # 6. SpO2 Heurístico (FE A3 ...)
@@ -966,22 +1003,24 @@ class BLEManager:
             if 85 <= spo2 <= 100:
                 self.current_spo2 = spo2
                 self.has_real_spo2 = True
-                database.save_spo2(spo2, source="Galaxy Fit3 BLE (Confirmado)")
+                if not self.is_mock_mode:
+                    database.save_spo2(spo2, source="Galaxy Fit3 BLE (Confirmado)")
                 note = f"SpO2 real: {spo2}%"
 
         # Actualizar cache de último payload para comparación de deltas
         self._last_char_payloads[char_uuid] = bytes(byte_list)
 
-        # Guardar paquete en SQLite
-        database.save_ble_packet(
-            service_uuid=service_uuid,
-            char_uuid=char_uuid,
-            direction=direction,
-            hex_string=hex_str,
-            raw_bytes=byte_list,
-            decoded_summary=decoded_summary,
-            note=note
-        )
+        # Guardar paquete en SQLite (solo si no es simulación)
+        if not self.is_mock_mode:
+            database.save_ble_packet(
+                service_uuid=service_uuid,
+                char_uuid=char_uuid,
+                direction=direction,
+                hex_string=hex_str,
+                raw_bytes=byte_list,
+                decoded_summary=decoded_summary,
+                note=note
+            )
 
         for s in self.discovered_services:
             for c in s["characteristics"]:
@@ -1426,6 +1465,8 @@ def save_ble_packet(service_uuid: str, char_uuid: str, direction: str, hex_strin
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (now_str, service_uuid, char_uuid, direction, hex_string, json.dumps(raw_bytes), decoded_summary, note))
     conn.commit()
+    conn.close()
+
 def save_setting(key: str, value: str):
     conn = get_connection()
     cursor = conn.cursor()
@@ -1453,12 +1494,12 @@ def purge_demo_data():
     init_db()
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM steps WHERE source LIKE '%Demo%'")
-    cursor.execute("DELETE FROM heart_rate WHERE source LIKE '%Demo%'")
-    cursor.execute("DELETE FROM sleep_sessions WHERE source LIKE '%Demo%'")
-    cursor.execute("DELETE FROM spo2 WHERE source LIKE '%Demo%'")
-    cursor.execute("DELETE FROM battery WHERE id IN (SELECT id FROM battery ORDER BY id ASC LIMIT 2)") # limpia semilla inicial de batería si existía
-    cursor.execute("DELETE FROM ble_packets WHERE service_uuid LIKE '%Mock%' OR char_uuid LIKE '%Mock%'")
+    cursor.execute("DELETE FROM steps")
+    cursor.execute("DELETE FROM heart_rate")
+    cursor.execute("DELETE FROM sleep_sessions")
+    cursor.execute("DELETE FROM spo2")
+    cursor.execute("DELETE FROM battery")
+    cursor.execute("DELETE FROM ble_packets")
     conn.commit()
     conn.close()
 
@@ -1649,6 +1690,8 @@ def export_heart_rate_csv() -> str:
         writer.writerow([r["timestamp"], r["bpm"], r["contact"], r["rr_interval_ms"], r["source"]])
     return output.getvalue()
 
+# Inicializar esquema de tablas al importar el módulo
+init_db()
 
 ==> main.py <==
 import os
@@ -1685,9 +1728,9 @@ ble_manager = BLEManager()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Inicialización en arranque (Sin sembrar datos demo falsos)
+    # Inicialización en arranque
     database.init_db()
-    database.purge_demo_data()
+    ble_manager._load_initial_metrics()
     logger.info("=" * 60)
     logger.info("🚀 Fit3 Mac Studio iniciado con éxito")
     logger.info("💻 Visualización y recolección de datos en tu Mac:")
@@ -2297,6 +2340,8 @@ async def websocket_logs_endpoint(websocket: WebSocket):
             Conecta el reloj o activa el Modo Simulación para explorar sus UUIDs propietarios y servicios estándar.
           </div>
         </div>
+      </div>
+
       <!-- Panel de Ingeniería Inversa y Mapeo de Pasos Samsung -->
       <div class="bg-appCard border border-appBorder rounded-3xl p-5 shadow-sm space-y-4">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -2672,43 +2717,61 @@ async def websocket_logs_endpoint(websocket: WebSocket):
       const quickBtn = document.getElementById('btnQuickConnect');
       const avatar = document.getElementById('deviceAvatar');
 
-      sub.textContent = status.last_status_message;
-      cardMsg.textContent = status.last_status_message;
+      if (sub && status.last_status_message) sub.textContent = status.last_status_message;
+      if (cardMsg && status.last_status_message) cardMsg.textContent = status.last_status_message;
 
       if (status.connection_state === 'connected') {
-        badge.textContent = "Conectado";
-        badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-fitSage/20 text-fitSage border border-fitSage/30";
-        cardName.textContent = status.connected_device_name;
-        quickBtn.textContent = "Desconectar";
-        quickBtn.className = "px-4 py-2 rounded-xl bg-fitCoral text-white text-xs font-bold hover:brightness-105 transition-all";
-        avatar.classList.add('pulse-watch');
+        if (badge) {
+          badge.textContent = "Conectado";
+          badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-fitSage/20 text-fitSage border border-fitSage/30";
+        }
+        if (cardName) cardName.textContent = status.connected_device_name;
+        if (quickBtn) {
+          quickBtn.textContent = "Desconectar";
+          quickBtn.className = "px-4 py-2 rounded-xl bg-fitCoral text-white text-xs font-bold hover:brightness-105 transition-all";
+        }
+        if (avatar) avatar.classList.add('pulse-watch');
       } else if (status.connection_state === 'simulating') {
-        badge.textContent = "Simulación";
-        badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-fitAmber/20 text-fitAmber border border-fitAmber/30";
-        cardName.textContent = "Galaxy Fit3 (78DC) [Sim]";
-        quickBtn.textContent = "Detener Sim";
-        quickBtn.className = "px-4 py-2 rounded-xl bg-appCardElevated text-appText border border-appBorder text-xs font-bold";
-        avatar.classList.remove('pulse-watch');
+        if (badge) {
+          badge.textContent = "Simulación";
+          badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-fitAmber/20 text-fitAmber border border-fitAmber/30";
+        }
+        if (cardName) cardName.textContent = "Galaxy Fit3 (78DC) [Sim]";
+        if (quickBtn) {
+          quickBtn.textContent = "Detener Sim";
+          quickBtn.className = "px-4 py-2 rounded-xl bg-appCardElevated text-appText border border-appBorder text-xs font-bold";
+        }
+        if (avatar) avatar.classList.remove('pulse-watch');
       } else if (status.connection_state === 'connecting' || status.connection_state === 'scanning') {
-        badge.textContent = status.connection_state === 'scanning' ? "Buscando..." : "Conectando...";
-        badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-fitTerracotta/20 text-fitTerracotta border border-fitTerracotta/30";
+        if (badge) {
+          badge.textContent = status.connection_state === 'scanning' ? "Buscando..." : "Conectando...";
+          badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-fitTerracotta/20 text-fitTerracotta border border-fitTerracotta/30";
+        }
       } else {
-        badge.textContent = "Desconectado";
-        badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-appCardElevated text-appMuted border border-appBorder";
-        quickBtn.textContent = "Conectar Reloj";
-        quickBtn.className = "px-4 py-2 rounded-xl bg-fitAmber text-black text-xs font-bold hover:brightness-105 transition-all";
-        avatar.classList.remove('pulse-watch');
+        if (badge) {
+          badge.textContent = "Desconectado";
+          badge.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-appCardElevated text-appMuted border border-appBorder";
+        }
+        if (quickBtn) {
+          quickBtn.textContent = "Conectar Reloj";
+          quickBtn.className = "px-4 py-2 rounded-xl bg-fitAmber text-black text-xs font-bold hover:brightness-105 transition-all";
+        }
+        if (avatar) avatar.classList.remove('pulse-watch');
       }
 
-      btnMock.textContent = state.isMockMode ? "Simulación ON" : "Simulación OFF";
+      if (btnMock) btnMock.textContent = state.isMockMode ? "Simulación ON" : "Simulación OFF";
 
-      // Actualizar IP local y QR si vino en el payload
+      // Actualizar IP local y QR si existen en el DOM
       if (status.local_ip) {
         state.localIp = status.local_ip;
         const url = `http://${status.local_ip}:${status.server_port || 8000}`;
-        document.getElementById('localIpUrlText').textContent = url;
-        document.getElementById('shortcutEndpointCode').textContent = `${url}/api/apple-health-export`;
-        renderQRCode(url);
+        const elUrl = document.getElementById('localIpUrlText');
+        if (elUrl) elUrl.textContent = url;
+        const elShortcut = document.getElementById('shortcutEndpointCode');
+        if (elShortcut) elShortcut.textContent = `${url}/api/apple-health-export`;
+        if (typeof renderQRCode === 'function' && document.getElementById('qrCodeContainer')) {
+          renderQRCode(url);
+        }
       }
     }
 
