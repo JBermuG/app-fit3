@@ -782,29 +782,110 @@
 
     function updateTelemetryUI(t) {
       if (!t) return;
-      document.getElementById('valSteps').textContent = Number(t.steps || 0).toLocaleString();
-      document.getElementById('valCalories').textContent = Math.round(t.calories || 0);
-      document.getElementById('valActiveMins').textContent = t.active_minutes || 0;
-      document.getElementById('distanceKmBadge').textContent = `${((t.distance_meters || 0) / 1000).toFixed(2)} km`;
 
-      document.getElementById('valHeartRateBpm').textContent = t.heart_rate_latest || 72;
-      document.getElementById('valHeartRateAvg').textContent = `Promedio hoy: ${t.heart_rate_avg || 72} BPM`;
-      document.getElementById('valBatteryLevel').textContent = `${t.battery || 85}%`;
-      document.getElementById('headerBatteryVal').textContent = `${t.battery || 85}%`;
-      document.getElementById('barBattery').style.width = `${t.battery || 85}%`;
-      document.getElementById('valSpO2').textContent = t.spo2 || 98;
+      // 1. Pasos y Actividad Diaria
+      const hasSteps = t.has_real_steps && t.steps !== null && t.steps !== undefined;
+      const elSteps = document.getElementById('valSteps');
+      const elCal = document.getElementById('valCalories');
+      const elAct = document.getElementById('valActiveMins');
+      const elDist = document.getElementById('distanceKmBadge');
+      const elStepsStatus = document.getElementById('stepsStatusBadge');
 
-      // Anillos concéntricos SVG
-      const stepProg = Math.min((t.steps || 0) / 10000, 1);
-      const calProg = Math.min((t.calories || 0) / 400, 1);
-      const actProg = Math.min((t.active_minutes || 0) / 60, 1);
+      if (hasSteps) {
+        elSteps.textContent = Number(t.steps).toLocaleString();
+        elCal.textContent = Math.round(t.calories || 0);
+        elAct.textContent = t.active_minutes || 0;
+        elDist.textContent = `${((t.distance_meters || 0) / 1000).toFixed(2)} km`;
+        elDist.className = "text-xs font-bold text-fitAmber";
+        if (elStepsStatus) {
+          elStepsStatus.textContent = "Confirmado por BLE";
+          elStepsStatus.className = "text-[10px] text-fitSage font-medium block";
+        }
 
-      document.getElementById('ringStepsSvg').style.strokeDashoffset = 351.86 * (1 - stepProg);
-      document.getElementById('ringCaloriesSvg').style.strokeDashoffset = 257.61 * (1 - calProg);
-      document.getElementById('ringActiveSvg').style.strokeDashoffset = 163.36 * (1 - actProg);
+        const stepProg = Math.min((t.steps || 0) / 10000, 1);
+        const calProg = Math.min((t.calories || 0) / 400, 1);
+        const actProg = Math.min((t.active_minutes || 0) / 60, 1);
 
-      // Fases de sueño
-      if (t.sleep) {
+        document.getElementById('ringStepsSvg').style.strokeDashoffset = 351.86 * (1 - stepProg);
+        document.getElementById('ringCaloriesSvg').style.strokeDashoffset = 257.61 * (1 - calProg);
+        document.getElementById('ringActiveSvg').style.strokeDashoffset = 163.36 * (1 - actProg);
+      } else {
+        elSteps.textContent = "--";
+        elCal.textContent = "--";
+        elAct.textContent = "--";
+        elDist.textContent = "-- km";
+        elDist.className = "text-xs font-bold text-appMuted";
+        if (elStepsStatus) {
+          elStepsStatus.textContent = "Esperando paquete BLE real";
+          elStepsStatus.className = "text-[10px] text-appMuted block";
+        }
+
+        document.getElementById('ringStepsSvg').style.strokeDashoffset = 351.86;
+        document.getElementById('ringCaloriesSvg').style.strokeDashoffset = 257.61;
+        document.getElementById('ringActiveSvg').style.strokeDashoffset = 163.36;
+      }
+
+      // 2. Frecuencia Cardíaca
+      const hasHr = t.has_real_hr && t.heart_rate_latest !== null && t.heart_rate_latest !== undefined;
+      const elHr = document.getElementById('valHeartRateBpm');
+      const elHrAvg = document.getElementById('valHeartRateAvg');
+      const elSensorBadge = document.getElementById('sensorActiveBadge');
+
+      if (hasHr) {
+        elHr.textContent = t.heart_rate_latest;
+        elHrAvg.textContent = `Promedio hoy: ${t.heart_rate_avg || t.heart_rate_latest} BPM`;
+        if (elSensorBadge) {
+          elSensorBadge.textContent = "Sensor Activo";
+          elSensorBadge.className = "text-fitCoral font-semibold";
+        }
+      } else {
+        elHr.textContent = "--";
+        elHrAvg.textContent = "Esperando paquete BLE real...";
+        if (elSensorBadge) {
+          elSensorBadge.textContent = "Sensor Standby";
+          elSensorBadge.className = "text-appMuted font-semibold";
+        }
+      }
+
+      // 3. Batería (Lectura directa GATT 0x2A19)
+      const hasBat = t.has_real_battery && t.battery !== null && t.battery !== undefined;
+      const elBat = document.getElementById('valBatteryLevel');
+      const elHeaderBat = document.getElementById('headerBatteryVal');
+      const elBarBat = document.getElementById('barBattery');
+      const elBatPill = document.getElementById('batteryPill');
+
+      if (hasBat) {
+        elBat.textContent = `${t.battery}%`;
+        elHeaderBat.textContent = `${t.battery}%`;
+        elBarBat.style.width = `${t.battery}%`;
+        if (elBatPill) elBatPill.classList.remove('hidden');
+      } else {
+        elBat.textContent = "--%";
+        elHeaderBat.textContent = "--%";
+        elBarBat.style.width = "0%";
+      }
+
+      // 4. Oxígeno SpO2
+      const hasSpo2 = t.has_real_spo2 && t.spo2 !== null && t.spo2 !== undefined;
+      const elSpo2 = document.getElementById('valSpO2');
+      const elSpo2Badge = document.getElementById('spo2StatusBadge');
+      if (hasSpo2) {
+        elSpo2.textContent = t.spo2;
+        if (elSpo2Badge) {
+          elSpo2Badge.textContent = "Normal";
+          elSpo2Badge.className = "text-[10px] font-bold text-fitSage bg-fitSage/15 px-2 py-0.5 rounded-full";
+        }
+      } else {
+        elSpo2.textContent = "--";
+        if (elSpo2Badge) {
+          elSpo2Badge.textContent = "Sin lectura";
+          elSpo2Badge.className = "text-[10px] font-bold text-appMuted bg-appCardElevated px-2 py-0.5 rounded-full";
+        }
+      }
+
+      // 5. Fases de Sueño
+      const hasSleep = t.has_real_sleep && t.sleep && t.sleep.total_minutes > 0;
+      if (hasSleep) {
         const s = t.sleep;
         const total = (s.deep_minutes || 0) + (s.light_minutes || 0) + (s.rem_minutes || 0);
         const inBed = total + (s.awake_minutes || 0);
@@ -823,10 +904,26 @@
         document.getElementById('txtSleepLight').textContent = `${Math.floor((s.light_minutes || 0) / 60)}h ${(s.light_minutes || 0) % 60}m`;
         document.getElementById('txtSleepRem').textContent = `${Math.floor((s.rem_minutes || 0) / 60)}h ${(s.rem_minutes || 0) % 60}m`;
         document.getElementById('txtSleepAwake').textContent = `0h ${s.awake_minutes || 0}m`;
+      } else {
+        document.getElementById('valSleepTotalTime').textContent = "--";
+        document.getElementById('valSleepScore').textContent = "Sin registro hoy";
+        document.getElementById('barSleepDeep').style.width = "0%";
+        document.getElementById('barSleepLight').style.width = "0%";
+        document.getElementById('barSleepRem').style.width = "0%";
+        document.getElementById('barSleepAwake').style.width = "0%";
+        document.getElementById('txtSleepDeep').textContent = "--";
+        document.getElementById('txtSleepLight').textContent = "--";
+        document.getElementById('txtSleepRem').textContent = "--";
+        document.getElementById('txtSleepAwake').textContent = "--";
       }
 
-      if (t.hr_chart) {
+      if (hasHr && t.hr_chart && t.hr_chart.length > 0) {
         updateChartData(t.hr_chart);
+      }
+
+      // Actualizar badge de mapeo si vino en la telemetría
+      if (t.custom_steps_uuid) {
+        updateMappingBadge(t.custom_steps_uuid, t.custom_steps_offset || 0, t.custom_steps_bytes || 4);
       }
     }
 
@@ -841,6 +938,36 @@
       card.dataset.dir = p.direction || "RX";
 
       const dirColor = p.direction === "TX" ? "bg-fitTerracotta/20 text-fitTerracotta" : "bg-fitAmber/20 text-fitAmber";
+
+      // Renderizar candidatos a pasos detectados
+      let candidatesHtml = '';
+      if (p.step_candidates && p.step_candidates.length > 0) {
+        const items = p.step_candidates.map(c => {
+          const deltaStr = c.is_increment ? `<span class="text-fitSage font-extrabold">(+${c.delta})</span>` : '';
+          const targetChar = p.short_uuid || p.char_uuid || 'FEA1';
+          return `
+            <div class="flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-appBg border border-fitAmber/30 text-[10px]">
+              <span class="text-appMuted">Off ${c.offset} [${c.type}]:</span>
+              <span class="text-fitAmber font-bold">${c.value.toLocaleString()}</span>
+              ${deltaStr}
+              <button onclick="applyStepMapping('${targetChar}', ${c.offset}, ${c.byte_len})" class="ml-1 px-1.5 py-0.5 rounded bg-fitAmber/20 hover:bg-fitAmber text-fitAmber hover:text-black font-extrabold text-[9px] transition-all" title="Asignar este offset a pasos diarios">
+                🎯 Mapear
+              </button>
+            </div>
+          `;
+        }).join('');
+
+        candidatesHtml = `
+          <div class="pt-1.5 border-t border-appBorder/50 space-y-1">
+            <span class="text-[9px] text-appMuted uppercase font-bold flex items-center gap-1">
+              <span>🎯</span> Candidatos detectados (Little-Endian):
+            </span>
+            <div class="flex flex-wrap gap-1.5">
+              ${items}
+            </div>
+          </div>
+        `;
+      }
 
       card.innerHTML = `
         <div class="flex items-center justify-between text-[10px]">
@@ -858,6 +985,7 @@
           <span class="text-fitAmber font-bold">${p.decoded_summary || ""}</span>
         </div>
         ${p.note ? `<div class="text-[10px] text-fitMauve font-semibold">${p.note}</div>` : ''}
+        ${candidatesHtml}
       `;
 
       if (prepend) {
