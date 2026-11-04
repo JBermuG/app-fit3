@@ -1,4 +1,6 @@
 venv/
 *.sqlite
-*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
 __pycache__/
+.DS_Store
